@@ -88,10 +88,10 @@ pub async fn start_proxy(app: AppHandle) -> Result<String, String> {
 
     let ws_url: url::Url = ws_url_str.parse().map_err(|e| format!("Bad URL: {e}"))?;
 
-    // Build request with Cookie header
+    // Build bare request — tokio-tungstenite adds WebSocket upgrade headers.
+    // Only add Cookie header; don't set Host or other headers manually.
     let mut req_builder = tokio_tungstenite::tungstenite::http::Request::builder()
-        .uri(ws_url.as_str())
-        .header("Host", ws_url.host_str().unwrap_or(""));
+        .uri(ws_url.as_str());
 
     if let Some(cookie_header) = cookie_jar.cookies(&ws_url) {
         if let Ok(cookie_str) = cookie_header.to_str() {
@@ -101,10 +101,11 @@ pub async fn start_proxy(app: AppHandle) -> Result<String, String> {
         }
     }
 
+    // Use .body(()) — empty body for WebSocket upgrade GET request
     let ws_request = req_builder.body(()).map_err(|e| format!("WS request build: {e}"))?;
 
     let connector = native_tls_connector()?;
-    
+
     eprintln!("[proxy] Connecting to {ws_url_str}...");
     let (remote_ws, _) = connect_async_tls_with_config(ws_request, None, false, Some(connector))
         .await
