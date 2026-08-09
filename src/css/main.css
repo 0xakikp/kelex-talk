@@ -374,16 +374,18 @@ body.windowed::after {
 /* ── Gear button + settings panel ────────────────────────────────────── */
 .gear-btn {
     -webkit-app-region: no-drag;
-    background: transparent;
-    border: none;
+    background: rgba(0, 212, 255, 0.08);
+    border: 1px solid rgba(0, 212, 255, 0.25);
+    border-radius: 4px;
     color: var(--dim);
     cursor: pointer;
-    font-size: 13px;
-    line-height: 1;
-    padding: 2px 4px;
-    transition: color 0.2s;
+    font-family: 'Orbitron', monospace;
+    font-size: 10px;
+    letter-spacing: 2px;
+    padding: 2px 6px;
+    transition: all 0.2s;
 }
-.gear-btn:hover { color: var(--cyan); }
+.gear-btn:hover { color: var(--cyan); border-color: var(--cyan); background: rgba(0, 212, 255, 0.15); }
 
 .settings-overlay {
     position: fixed;

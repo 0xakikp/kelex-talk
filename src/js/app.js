@@ -144,11 +144,18 @@ if (TAURI?.event?.listen) {
     document.body.classList.toggle('windowed', await isWindowed());
     setState('standby');
 
+    // Wire the response area's "Open Settings" link
+    const responseLink = document.getElementById('responseSettingsLink');
+    if (responseLink) {
+        responseLink.onclick = (e) => { e.preventDefault(); openSettings(); };
+    }
+
     const gw = gatewayWsUrl();
     if (gw) {
         await connectGateway();
+        document.getElementById('response').textContent = 'Neural link online, sir.';
     } else {
-        setUplink('offline', 'No gateway configured — open Settings (⚙)');
+        setUplink('offline', 'No gateway configured');
     }
 
     console.log('[kelex] Online — Hermes Agent Desktop Client.');
