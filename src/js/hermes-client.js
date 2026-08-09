@@ -1,8 +1,5 @@
-// Hermes Gateway client — simplified for Rust proxy mode.
-//
-// The Tauri Rust backend handles authentication and WebSocket
-// connections (bypassing WebKit's cookie restrictions).
-// The JS frontend just communicates with the local proxy.
+// Hermes Gateway client — connects to local Rust proxy.
+// The Rust backend handles login + WS ticket + Hermes WS connection.
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 
@@ -18,48 +15,19 @@ export class HermesClient {
 
   get state() { return this._state; }
 
-  // ── Connection ──────────────────────────────────────────────────────
-
   connect(wsUrl) {
     this._url = wsUrl;
-
-    if (this._socket?.readyState === WebSocket.OPEN || this._state === 'connecting') {
-      return;
-    }
-
+    if (this._socket?.readyState === WebSocket.OPEN || this._state === 'connecting') return;
     this._setState('connecting');
-
     const socket = new WebSocket(wsUrl);
     this._socket = socket;
-
     socket.addEventListener('message', (e) => this._onMessage(e.data));
-    socket.addEventListener('close', () => {
-      this._socket = null;
-      this._setState('closed');
-      this._rejectAll(new Error('WebSocket closed'));
-    });
-    socket.addEventListener('error', () => {
-      this._socket = null;
-      this._setState('error');
-      this._rejectAll(new Error('WebSocket connection failed'));
-    });
-
+    socket.addEventListener('close', () => { this._socket = null; this._setState('closed'); this._rejectAll(new Error('WebSocket closed')); });
+    socket.addEventListener('error', () => { this._socket = null; this._setState('error'); this._rejectAll(new Error('WebSocket connection failed')); });
     return new Promise((resolve, reject) => {
       let settled = false;
-      const onOpen = () => {
-        if (settled) return;
-        settled = true;
-        socket.removeEventListener('error', onError);
-        this._setState('open');
-        resolve();
-      };
-      const onError = () => {
-        if (settled) return;
-        settled = true;
-        socket.removeEventListener('open', onOpen);
-        this._setState('error');
-        reject(new Error('WebSocket connection failed'));
-      };
+      const onOpen = () => { if (settled) return; settled = true; socket.removeEventListener('error', onError); this._setState('open'); resolve(); };
+      const onError = () => { if (settled) return; settled = true; socket.removeEventListener('open', onOpen); this._setState('error'); reject(new Error('connection failed')); };
       socket.addEventListener('open', onOpen, { once: true });
       socket.addEventListener('error', onError, { once: true });
     });
@@ -68,30 +36,20 @@ export class HermesClient {
   disconnect() {
     if (!this._socket) return;
     try { this._socket.close(); } catch (_) {}
-    this._socket = null;
-    this._setState('closed');
-    this._rejectAll(new Error('Disconnected'));
+    this._socket = null; this._setState('closed'); this._rejectAll(new Error('Disconnected'));
   }
-
-  // ── RPC ─────────────────────────────────────────────────────────────
 
   request(method, params = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
     const socket = this._socket;
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      return Promise.reject(new Error('Gateway not connected'));
-    }
+    if (!socket || socket.readyState !== WebSocket.OPEN) return Promise.reject(new Error('not connected'));
     const id = 'r' + (++this._nextId);
     const payload = JSON.stringify({ jsonrpc: '2.0', id, method, params });
     return new Promise((resolve, reject) => {
-      const timer = timeoutMs > 0
-        ? setTimeout(() => { this._pending.delete(id); reject(new Error(`Request timed out: ${method}`)); }, timeoutMs)
-        : null;
+      const timer = timeoutMs > 0 ? setTimeout(() => { this._pending.delete(id); reject(new Error(`timeout: ${method}`)); }, timeoutMs) : null;
       this._pending.set(id, { resolve, reject, timer });
       try { socket.send(payload); } catch (e) { this._clearPending(id); reject(e); }
     });
   }
-
-  // ── Events ──────────────────────────────────────────────────────────
 
   on(eventType, handler) {
     let set = this._handlers.get(eventType);
@@ -100,17 +58,8 @@ export class HermesClient {
     return () => set.delete(handler);
   }
   onAny(handler) { return this.on('*', handler); }
-  onState(handler) {
-    this._stateHandlers.add(handler);
-    handler(this._state);
-    return () => this._stateHandlers.delete(handler);
-  }
-
-  async chat(message, sessionId) {
-    return this.request('chat.send', { message, session_id: sessionId || null });
-  }
-
-  // ── Internal ────────────────────────────────────────────────────────
+  onState(handler) { this._stateHandlers.add(handler); handler(this._state); return () => this._stateHandlers.delete(handler); }
+  async chat(message, sessionId) { return this.request('chat.send', { message, session_id: sessionId || null }); }
 
   _onMessage(raw) {
     let frame;
@@ -132,25 +81,9 @@ export class HermesClient {
     }
   }
 
-  _clearPending(id) {
-    const call = this._pending.get(id);
-    if (call?.timer) clearTimeout(call.timer);
-    this._pending.delete(id);
-  }
-
-  _rejectAll(err) {
-    for (const [id, call] of this._pending) {
-      if (call.timer) clearTimeout(call.timer);
-      call.reject(err);
-      this._pending.delete(id);
-    }
-  }
-
-  _setState(state) {
-    if (this._state === state) return;
-    this._state = state;
-    for (const fn of this._stateHandlers) fn(state);
-  }
+  _clearPending(id) { const call = this._pending.get(id); if (call?.timer) clearTimeout(call.timer); this._pending.delete(id); }
+  _rejectAll(err) { for (const [id, call] of this._pending) { if (call.timer) clearTimeout(call.timer); call.reject(err); this._pending.delete(id); } }
+  _setState(state) { if (this._state === state) return; this._state = state; for (const fn of this._stateHandlers) fn(state); }
 }
 
 export const hermes = new HermesClient();
