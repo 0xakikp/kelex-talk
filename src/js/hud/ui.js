@@ -16,6 +16,7 @@ export function initUI() {
     dom.response = document.getElementById('response');
     dom.transcript = document.getElementById('transcript');
     dom.sysInfo = document.getElementById('sysInfo');
+    dom.actionLabel = document.getElementById('actionLabel');
 }
 
 // Drive the orb (blob.js) + chrome from one logical state name.
@@ -55,4 +56,22 @@ export function setUplink(kind, text) {
     if (!dom.sysInfo) return;
     dom.sysInfo.textContent = text;
     dom.sysInfo.className = kind;
+}
+
+// Top-right action label — shows what the agent is doing (tool calls, thinking, etc.)
+let actionClearTimer = null;
+
+export function showAction(text) {
+    if (!dom.actionLabel) return;
+    dom.actionLabel.textContent = text;
+    dom.actionLabel.classList.add('visible');
+    if (actionClearTimer) clearTimeout(actionClearTimer);
+    // Auto-clear after 4s of no update
+    actionClearTimer = setTimeout(() => clearAction(), 4000);
+}
+
+export function clearAction() {
+    if (actionClearTimer) clearTimeout(actionClearTimer);
+    actionClearTimer = null;
+    if (dom.actionLabel) dom.actionLabel.classList.remove('visible');
 }

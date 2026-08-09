@@ -7,7 +7,7 @@
 
 import { loadSettings, isWindowed, gatewayWsUrl } from './config.js';
 import { hermes } from './hermes-client.js';
-import { initUI, setState, showResponse, setUplink } from './hud/ui.js';
+import { initUI, setState, showResponse, setUplink, showAction, clearAction } from './hud/ui.js';
 import { state } from './hud/state.js';
 import { toggleConversation, isConversationActive } from './hud/mic.js';
 import { interruptResponse } from './hud/tts.js';
@@ -54,6 +54,32 @@ hermes.onState((s) => {
         setUplink('offline', 'offline — reconnecting…');
         if (reconnectTimer) clearTimeout(reconnectTimer);
         reconnectTimer = setTimeout(connectGateway, 3000);
+    }
+});
+
+// ── Live action status — shows what Hermes is doing in the top-right ──
+
+hermes.onAny((evt) => {
+    switch (evt.type) {
+        case 'thinking.delta':
+            showAction('THINKING…');
+            break;
+        case 'message.delta':
+            showAction('TYPING…');
+            break;
+        case 'tool.start': {
+            const name = evt.payload?.tool || evt.payload?.name || 'tool';
+            showAction(name.toUpperCase());
+            break;
+        }
+        case 'tool.progress':
+            // Keep the tool name visible, refresh the timer
+            break;
+        case 'tool.complete':
+        case 'message.complete':
+        case 'message.interim':
+            clearAction();
+            break;
     }
 });
 

@@ -119,6 +119,27 @@ body.windowed::after {
 }
 .top-bar .right { display: flex; gap: 14px; align-items: center; color: var(--dim); }
 
+.status-group {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 1px;
+    line-height: 1.1;
+}
+.action-label {
+    font-family: 'Rajdhani', sans-serif;
+    font-size: 9px;
+    color: var(--dim);
+    letter-spacing: 0.5px;
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    opacity: 0;
+    transition: opacity 0.25s;
+}
+.action-label.visible { opacity: 0.8; color: var(--cyan); }
+
 .status-dot {
     width: 8px;
     height: 8px;
