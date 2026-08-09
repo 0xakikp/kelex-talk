@@ -1,9 +1,8 @@
-// Hermes Gateway JSON-RPC 2.0 WebSocket client.
+// Hermes Gateway client — simplified for Rust proxy mode.
 //
-// Auth flow:
-//  1. Show a full-screen iframe with the Hermes login page
-//  2. User logs in natively → cookies set in webview
-//  3. WebSocket connection auto-includes those cookies
+// The Tauri Rust backend handles authentication and WebSocket
+// connections (bypassing WebKit's cookie restrictions).
+// The JS frontend just communicates with the local proxy.
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 
@@ -15,62 +14,9 @@ export class HermesClient {
     this._pending = new Map();
     this._handlers = new Map();
     this._stateHandlers = new Set();
-    this._baseUrl = '';
   }
 
   get state() { return this._state; }
-
-  // ── Login ─────────────────────────────────────────────────────────────
-
-  /**
-   * Show the Hermes login page in a full-window iframe.
-   * Returns a Promise that resolves when the user has logged in
-   * (detected by redirect away from /login).
-   */
-  login(gatewayUrl) {
-    const base = gatewayUrl.replace(/\/+$/, '');
-    this._baseUrl = base;
-
-    return new Promise((resolve, reject) => {
-      // Create full-screen iframe
-      const iframe = document.createElement('iframe');
-      iframe.id = 'hermes-login-iframe';
-      iframe.src = `${base}/login`;
-      iframe.style.cssText = `
-        position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-        border: none; z-index: 99999; background: #0a0a0a;
-      `;
-      document.body.appendChild(iframe);
-
-      let loadCount = 0;
-
-      const timeout = setTimeout(() => {
-        cleanup();
-        reject(new Error('Login timed out'));
-      }, 120000);
-
-      const cleanup = () => {
-        clearTimeout(timeout);
-        try { document.body.removeChild(iframe); } catch (_) {}
-      };
-
-      // onload fires on every navigation:
-      // 1st: login page loads
-      // 2nd: login succeeds → redirect to /
-      iframe.onload = () => {
-        loadCount++;
-        if (loadCount >= 2) {
-          cleanup();
-          resolve(true);
-        }
-      };
-
-      iframe.onerror = () => {
-        cleanup();
-        reject(new Error('Login page failed to load'));
-      };
-    });
-  }
 
   // ── Connection ──────────────────────────────────────────────────────
 
@@ -159,8 +105,6 @@ export class HermesClient {
     handler(this._state);
     return () => this._stateHandlers.delete(handler);
   }
-
-  // ── Convenience ─────────────────────────────────────────────────────
 
   async chat(message, sessionId) {
     return this.request('chat.send', { message, session_id: sessionId || null });

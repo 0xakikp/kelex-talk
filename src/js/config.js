@@ -56,6 +56,14 @@ export function gatewayWsUrl() {
     return wsBase + '/api/ws';
 }
 
+/**
+ * Ask the Rust backend to login and start the WebSocket proxy.
+ * Returns the local proxy URL (ws://127.0.0.1:PORT).
+ */
+export async function startProxy() {
+    return invoke('connect_gateway');
+}
+
 // ── Window mode ───────────────────────────────────────────────────────
 
 export async function isWindowed() {

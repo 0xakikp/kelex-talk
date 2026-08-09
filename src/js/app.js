@@ -5,7 +5,7 @@
 // Ctrl/Cmd+K = text chat (Hermes JSON-RPC WebSocket).
 // Esc = interrupt / close panels.
 
-import { loadSettings, isWindowed, gatewayWsUrl, gatewayUrl, gatewayAuth } from './config.js';
+import { loadSettings, isWindowed, gatewayUrl, gatewayAuth, startProxy } from './config.js';
 import { hermes } from './hermes-client.js';
 import { initUI, setState, showResponse, setUplink, showAction, clearAction } from './hud/ui.js';
 import { state } from './hud/state.js';
@@ -24,7 +24,6 @@ initUI();
 let reconnectTimer = null;
 
 async function connectGateway() {
-    const wsUrl = gatewayWsUrl();
     const gw = gatewayUrl();
     const auth = gatewayAuth();
 
@@ -33,16 +32,21 @@ async function connectGateway() {
         return;
     }
 
-    try {
-        // Show login page in full-window iframe
-        setUplink('connecting', 'open login page…');
-        await hermes.login(gw);
+    if (!auth.username || !auth.password) {
+        setUplink('offline', 'Set username & password in Settings');
+        return;
+    }
 
-        // Connect WebSocket (cookies now in webview)
+    try {
+        // Rust backend handles login + WS proxy (bypasses WebKit cookie blocking)
+        setUplink('connecting', 'logging in…');
+        const localUrl = await startProxy();
+        
+        // Connect to local proxy
         setUplink('connecting', 'connecting…');
-        await hermes.connect(wsUrl);
+        await hermes.connect(localUrl);
         setUplink('online', 'online');
-        console.log('[kelex] Gateway connected:', wsUrl);
+        console.log('[kelex] Connected via proxy:', localUrl);
     } catch (e) {
         setUplink('offline', `offline — ${e.message}`);
         console.warn('[kelex] Gateway connect failed:', e.message);

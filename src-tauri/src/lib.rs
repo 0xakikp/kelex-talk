@@ -6,6 +6,7 @@
 // needed — Hermes Gateway handles CORS/WS natively).
 
 mod wake;
+mod proxy;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -242,6 +243,11 @@ fn notify(app: AppHandle, title: String, body: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn connect_gateway(app: AppHandle) -> Result<String, String> {
+    proxy::start_proxy(app).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -439,6 +445,7 @@ pub fn run() {
             wake_pause,
             wake_resume,
             notify,
+            connect_gateway,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
