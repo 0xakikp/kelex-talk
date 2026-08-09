@@ -1,56 +1,52 @@
 use std::{env, path::PathBuf, process::Command};
 
 fn main() {
-    println!("cargo:rerun-if-changed=macos/kelex_mic.swift");
+    println!("cargo:rerun-if-changed=macos/microphone_capture.m");
 
     let target = env::var("TARGET").expect("Cargo TARGET is set");
-    println!("cargo:rustc-env=KELEX_MIC_TARGET={target}");
-    let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let output = manifest.join("bin").join(format!("kelex_mic-{target}"));
     if target.ends_with("apple-darwin") {
-        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
-        let source = manifest.join("macos/kelex_mic.swift");
-        let swift_target = match target.as_str() {
-            "aarch64-apple-darwin" => "arm64-apple-macosx10.15",
-            "x86_64-apple-darwin" => "x86_64-apple-macosx10.15",
-            other => panic!("unsupported macOS target for kelex_mic: {other}"),
-        };
+        let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+        let source = manifest.join("macos/microphone_capture.m");
+        let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+        let object = out_dir.join("microphone_capture.o");
+        let library = out_dir.join("libkelex_mic.a");
 
-        let result = Command::new("xcrun")
+        let compile = Command::new("xcrun")
             .args([
-                "swiftc",
-                "-O",
-                "-whole-module-optimization",
-                "-target",
-                swift_target,
-                "-framework",
-                "AVFoundation",
-                "-framework",
-                "Foundation",
+                "clang",
+                "-fobjc-arc",
+                "-mmacosx-version-min=10.15",
+                "-c",
             ])
             .arg(&source)
             .arg("-o")
-            .arg(&output)
+            .arg(&object)
             .output()
-            .expect("Xcode command-line tools are required to build the native Kelex microphone helper");
-
-        if !result.status.success() {
+            .expect("Xcode command-line tools are required to compile native microphone capture");
+        if !compile.status.success() {
             panic!(
-                "Swift AVAudioEngine helper failed to compile:\n{}",
-                String::from_utf8_lossy(&result.stderr)
+                "Objective-C microphone capture failed to compile:\n{}",
+                String::from_utf8_lossy(&compile.stderr)
             );
         }
-    } else {
-        // Tauri validates externalBin for every Cargo target.  This generated
-        // stub exists only to let Linux CI/VPS checks run; Kelex does not ship
-        // a Linux desktop microphone sidecar.
-        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
-        std::fs::write(&output, b"#!/bin/sh\necho 'kelex_mic is macOS-only' >&2\nexit 1\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let archive = Command::new("xcrun")
+            .args(["libtool", "-static", "-o"])
+            .arg(&library)
+            .arg(&object)
+            .output()
+            .expect("Xcode libtool is required to archive native microphone capture");
+        if !archive.status.success() {
+            panic!(
+                "Objective-C microphone capture failed to archive:\n{}",
+                String::from_utf8_lossy(&archive.stderr)
+            );
         }
+
+        println!("cargo:rustc-link-search=native={}", out_dir.display());
+        println!("cargo:rustc-link-lib=static=kelex_mic");
+        println!("cargo:rustc-link-lib=framework=AVFoundation");
+        println!("cargo:rustc-link-lib=framework=Foundation");
     }
 
     tauri_build::build()

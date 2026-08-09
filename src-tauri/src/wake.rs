@@ -10,8 +10,17 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
+#[cfg(target_os = "macos")]
+use std::os::fd::FromRawFd;
 
 use tauri::{AppHandle, Manager};
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn kelex_microphone_request_access() -> std::os::raw::c_int;
+    fn kelex_microphone_start(write_fd: std::os::raw::c_int) -> std::os::raw::c_int;
+    fn kelex_microphone_stop();
+}
 
 use crate::{summon, AppState};
 
@@ -97,6 +106,35 @@ pub fn set_paused(app: &AppHandle, paused: bool) {
         .store(paused, Ordering::SeqCst);
 }
 
+#[cfg(target_os = "macos")]
+fn open_native_microphone() -> Result<std::fs::File, String> {
+    // This executes inside Kelex's signed process, so TCC binds approval to
+    // com.akikp.kelex instead of treating capture as a separate sidecar app.
+    if unsafe { kelex_microphone_request_access() } != 1 {
+        return Err("microphone access denied; enable Kelex in System Settings → Privacy & Security → Microphone".into());
+    }
+
+    let mut fds = [0i32; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return Err(format!("could not create native microphone pipe: {}", std::io::Error::last_os_error()));
+    }
+    let result = unsafe { kelex_microphone_start(fds[1]) };
+    if result != 0 {
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+        return Err(format!("AVAudioEngine could not start (code {result})"));
+    }
+    // Ownership of fds[1] transfers to Objective-C capture.
+    Ok(unsafe { std::fs::File::from_raw_fd(fds[0]) })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_native_microphone() -> Result<std::fs::File, String> {
+    Err("native AVAudioEngine capture is macOS-only".into())
+}
+
 fn run(
     app: AppHandle,
     flags: WakeFlags,
@@ -108,44 +146,10 @@ fn run(
     gateway_pass: String,
     http: reqwest::Client,
 ) {
-    // Cargo's build hook compiles the Swift AVAudioEngine helper to this
-    // target-suffixed path for `tauri dev`. Tauri copies it alongside the
-    // executable in an app bundle, so release resolves it next to us.
-    let helper = if cfg!(debug_assertions) {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("bin")
-            .join(format!("kelex_mic-{}", env!("KELEX_MIC_TARGET")))
-    } else {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("kelex_mic")))
-            .unwrap_or_else(|| std::path::PathBuf::from("kelex_mic"))
-    };
-
-    if !helper.exists() {
-        eprintln!("[wake] kelex_mic helper not found at {}", helper.display());
-        eprintln!("[wake] build it with: cargo build --bin kelex_mic");
-        flags.running.store(false, Ordering::SeqCst);
-        return;
-    }
-
-    let mut child = match std::process::Command::new(&helper)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()
-    {
-        Ok(c) => c,
+    let mut stdout = match open_native_microphone() {
+        Ok(file) => file,
         Err(e) => {
-            eprintln!("[wake] failed to spawn kelex_mic: {e}");
-            flags.running.store(false, Ordering::SeqCst);
-            return;
-        }
-    };
-
-    let mut stdout = match child.stdout.take() {
-        Some(s) => std::io::BufReader::new(s),
-        None => {
-            eprintln!("[wake] kelex_mic has no stdout");
+            eprintln!("[wake] {e}");
             flags.running.store(false, Ordering::SeqCst);
             return;
         }
@@ -153,16 +157,17 @@ fn run(
 
     use std::io::Read;
     let mut hdr = [0u8; 6];
-    if stdout.read_exact(&mut hdr).is_err() {
-        eprintln!("[wake] failed to read kelex_mic header");
-        let _ = child.kill();
+    if let Err(e) = stdout.read_exact(&mut hdr) {
+        eprintln!("[wake] failed to read native microphone header: {e}");
+        #[cfg(target_os = "macos")]
+        unsafe { kelex_microphone_stop() };
         flags.running.store(false, Ordering::SeqCst);
         return;
     }
     let sr = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]) as f32;
     let _channels = u16::from_le_bytes([hdr[4], hdr[5]]) as usize;
 
-    eprintln!("[wake] kelex_mic connected — sr={sr}");
+    eprintln!("[wake] native AVAudioEngine connected — sr={sr}");
 
     let (tx, rx) = mpsc::channel::<Vec<f32>>();
 
@@ -247,17 +252,8 @@ fn run(
         }
     }
 
-    let _ = child.kill();
-    match child.wait() {
-        Ok(status) if status.code() == Some(77) => {
-            eprintln!("[wake] microphone permission was denied by macOS");
-        }
-        Ok(status) if !status.success() => {
-            eprintln!("[wake] kelex_mic exited with {status}");
-        }
-        Ok(_) => {}
-        Err(e) => eprintln!("[wake] kelex_mic wait failed: {e}"),
-    }
+    #[cfg(target_os = "macos")]
+    unsafe { kelex_microphone_stop() };
     flags.stopped.store(true, Ordering::SeqCst);
     flags.running.store(false, Ordering::SeqCst);
     eprintln!("[wake] stopped");
