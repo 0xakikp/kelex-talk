@@ -8,9 +8,10 @@ use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
 use reqwest::cookie::Jar;
+use reqwest::cookie::CookieStore;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{connect_async, accept_async, MaybeTlsStream, WebSocketStream, tungstenite::Message};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 use crate::AppState;
 

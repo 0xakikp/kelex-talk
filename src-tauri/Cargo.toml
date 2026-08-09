@@ -26,6 +26,7 @@ hound = "3"
 # HTTP client for wake-word POST to Hermes Gateway /api/wake-detect
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart", "cookies"] }
 base64 = "0.22"
+url = "2"
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
 tokio = { version = "1", features = ["net", "rt", "sync", "macros"] }
