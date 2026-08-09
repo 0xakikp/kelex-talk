@@ -11,8 +11,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::SampleFormat;
 use tauri::{AppHandle, Manager};
 
 use crate::{summon, AppState};
@@ -99,10 +97,6 @@ pub fn set_paused(app: &AppHandle, paused: bool) {
         .store(paused, Ordering::SeqCst);
 }
 
-fn err_fn(e: cpal::Error) {
-    eprintln!("[wake] stream error: {e}");
-}
-
 fn run(
     app: AppHandle,
     flags: WakeFlags,
@@ -114,10 +108,19 @@ fn run(
     gateway_pass: String,
     http: reqwest::Client,
 ) {
-    let helper = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("kelex_mic")))
-        .unwrap_or_else(|| std::path::PathBuf::from("kelex_mic"));
+    // Cargo's build hook compiles the Swift AVAudioEngine helper to this
+    // target-suffixed path for `tauri dev`. Tauri copies it alongside the
+    // executable in an app bundle, so release resolves it next to us.
+    let helper = if cfg!(debug_assertions) {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("bin")
+            .join(format!("kelex_mic-{}", env!("KELEX_MIC_TARGET")))
+    } else {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("kelex_mic")))
+            .unwrap_or_else(|| std::path::PathBuf::from("kelex_mic"))
+    };
 
     if !helper.exists() {
         eprintln!("[wake] kelex_mic helper not found at {}", helper.display());
@@ -214,6 +217,7 @@ fn run(
     eprintln!("[wake] listening — say \"jarvis\"");
 
     let mut sample_buf = [0u8; 4 * 1024];
+    let mut pending = Vec::<u8>::new();
     loop {
         if !flags.running.load(Ordering::Relaxed) {
             break;
@@ -224,18 +228,16 @@ fn run(
                 break;
             }
             Ok(n) => {
-                let complete = n / 4;
-                let samples: Vec<f32> = (0..complete)
-                    .map(|i| {
-                        let off = i * 4;
-                        f32::from_le_bytes([
-                            sample_buf[off],
-                            sample_buf[off + 1],
-                            sample_buf[off + 2],
-                            sample_buf[off + 3],
-                        ])
-                    })
+                pending.extend_from_slice(&sample_buf[..n]);
+                let complete = pending.len() / 4;
+                if complete == 0 {
+                    continue;
+                }
+                let samples: Vec<f32> = pending[..complete * 4]
+                    .chunks_exact(4)
+                    .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
                     .collect();
+                pending.drain(..complete * 4);
                 rec.feed_f32(&samples);
             }
             Err(e) => {
@@ -246,7 +248,16 @@ fn run(
     }
 
     let _ = child.kill();
-    let _ = child.wait();
+    match child.wait() {
+        Ok(status) if status.code() == Some(77) => {
+            eprintln!("[wake] microphone permission was denied by macOS");
+        }
+        Ok(status) if !status.success() => {
+            eprintln!("[wake] kelex_mic exited with {status}");
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("[wake] kelex_mic wait failed: {e}"),
+    }
     flags.stopped.store(true, Ordering::SeqCst);
     flags.running.store(false, Ordering::SeqCst);
     eprintln!("[wake] stopped");
@@ -269,24 +280,8 @@ impl Recorder {
     fn feed_f32(&mut self, data: &[f32]) {
         self.feed(data.iter().copied());
     }
-    fn feed_i16(&mut self, data: &[i16]) {
-        self.feed(data.iter().map(|&s| s as f32 / 32768.0));
-    }
-    fn feed_u16(&mut self, data: &[u16]) {
-        self.feed(data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0));
-    }
 
     fn feed(&mut self, samples: impl Iterator<Item = f32>) {
-        // Log first callback so we know CPAL is delivering audio.
-        if self.diag_samples == 0 {
-            let dev = cpal::default_host()
-                .default_input_device()
-                .and_then(|d| d.description().ok())
-                .map(|desc| desc.name().to_string())
-                .unwrap_or_else(|| "none".into());
-            eprintln!("[capture] first callback — device={dev}");
-        }
-
         if self.paused.load(Ordering::Relaxed) {
             self.buf.clear();
             self.speech = false;
@@ -396,96 +391,6 @@ fn encode_wav(samples: &[i16]) -> Vec<u8> {
         let _ = w.finalize();
     }
     cursor.into_inner()
-}
-
-/// Capture one VAD-bounded utterance from the native microphone and return WAV.
-/// This is deliberately native CPAL, not WKWebView getUserMedia: macOS WebKit
-/// does not expose SpeechRecognition reliably to Tauri apps.
-fn capture_utterance_wav() -> Result<Vec<u8>, String> {
-    let host = cpal::default_host();
-    let device = host.default_input_device().ok_or("No microphone input device")?;
-    let input = device.default_input_config().map_err(|e| format!("Microphone config: {e}"))?;
-    let sr = input.sample_rate() as f32;
-    let channels = input.channels() as usize;
-    let fmt = input.sample_format();
-    let cfg: cpal::StreamConfig = input.into();
-    let (tx, rx) = mpsc::channel::<Vec<f32>>();
-    let paused = Arc::new(AtomicBool::new(false));
-
-    // Shared max-RMS for diagnostics — if mic permission is denied, macOS
-    // CoreAudio returns silence (RMS 0.0).  We log every 2 s so the user
-    // sees why speech isn't being detected.
-    let max_rms = Arc::new(std::sync::Mutex::new(0.0f32));
-    let max_rms_probe = max_rms.clone();
-
-    let mk = |tx: mpsc::Sender<Vec<f32>>, max_rms: Arc<std::sync::Mutex<f32>>| Recorder {
-        sr,
-        channels,
-        paused: paused.clone(),
-        tx,
-        buf: Vec::new(),
-        speech: false,
-        silence: 0,
-        diag_samples: 0usize,
-        diag_max_rms: max_rms,
-    };
-
-    let stream = match fmt {
-        SampleFormat::F32 => {
-            let mut rec = mk(tx.clone(), max_rms.clone());
-            device.build_input_stream(cfg.clone(), move |d: &[f32], _| rec.feed_f32(d), err_fn, None)
-        }
-        SampleFormat::I16 => {
-            let mut rec = mk(tx.clone(), max_rms.clone());
-            device.build_input_stream(cfg.clone(), move |d: &[i16], _| rec.feed_i16(d), err_fn, None)
-        }
-        SampleFormat::U16 => {
-            let mut rec = mk(tx.clone(), max_rms.clone());
-            device.build_input_stream(cfg.clone(), move |d: &[u16], _| rec.feed_u16(d), err_fn, None)
-        }
-        other => return Err(format!("Unsupported microphone sample format: {other:?}")),
-    }.map_err(|e| format!("Open microphone: {e}"))?;
-
-    eprintln!(
-        "[capture] mic open — sr={sr:.0} ch={channels} fmt={fmt:?}.  Say something…"
-    );
-
-    // Probe the max RMS every 2 s to surface permission-denied silence.
-    let diag_running = Arc::new(AtomicBool::new(true));
-    let diag_flag = diag_running.clone();
-    let _diag_handle = std::thread::spawn(move || {
-        let start = std::time::Instant::now();
-        while diag_flag.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_secs(2));
-            if !diag_flag.load(Ordering::Relaxed) { break; }
-            let rms = *max_rms_probe.lock().unwrap();
-            let elapsed = start.elapsed().as_secs();
-            eprintln!(
-                "[capture] diag {elapsed}s — max RMS seen: {rms:.6}  (threshold {RMS_START})"
-            );
-            if rms == 0.0 && elapsed > 4 {
-                eprintln!(
-                    "[capture] ⚠  ZERO audio for {elapsed}s — mic permission likely denied.  "
-                );
-                eprintln!(
-                    "[capture]     Check System Settings → Privacy → Microphone → Kelex"
-                );
-            }
-        }
-    });
-
-    drop(tx);
-    stream.play().map_err(|e| format!("Start microphone: {e}"))?;
-    let raw = rx.recv_timeout(Duration::from_secs(15))
-        .map_err(|_| "No speech detected within 15 seconds")?;
-    drop(stream);
-    diag_running.store(false, Ordering::Relaxed);
-
-    eprintln!(
-        "[capture] utterance captured — {} samples",
-        raw.len()
-    );
-    Ok(encode_wav(&resample_to_16k(&raw, sr)))
 }
 
 /// Cookie-auth login → POST WAV to /api/audio/transcribe → extract transcript.

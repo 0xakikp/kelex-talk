@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# macOS Swift microphone sidecars are compiled by src-tauri/build.rs.
+src-tauri/bin/kelex_mic-*

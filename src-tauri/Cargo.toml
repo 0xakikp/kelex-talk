@@ -21,8 +21,7 @@ tauri-plugin-autostart = "2"
 tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# Wake-word engine: native mic capture (cpal) + WAV encode (hound).
-cpal = "0.18"
+# Wake-word engine: Swift AVAudioEngine sidecar output + WAV encode (hound).
 hound = "3"
 # HTTP client for wake-word POST to Hermes Gateway /api/wake-detect
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart", "cookies"] }
