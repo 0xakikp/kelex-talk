@@ -1,0 +1,43 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "kelex-talk",
+  "version": "0.1.0",
+  "identifier": "com.akikp.kelextalk",
+  "build": {
+    "frontendDist": "../src"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "kelex-talk",
+        "width": 520,
+        "height": 680,
+        "minWidth": 280,
+        "minHeight": 320,
+        "center": true,
+        "resizable": true,
+        "decorations": true,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "shadow": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

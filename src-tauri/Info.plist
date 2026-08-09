@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Required for WKWebView getUserMedia (voice conversation). Without
+         this, macOS denies/crashes on first mic access. -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>kelex-talk uses the microphone for voice conversation with kelex.</string>
+</dict>
+</plist>

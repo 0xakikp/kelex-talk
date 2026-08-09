@@ -1,0 +1,452 @@
+/* kelex-talk — HUD visual identity, ported from kelex/static/css/main.css.
+   Trimmed to the orb + chrome needed for the floating assistant; widget
+   styles from the legacy dashboard are intentionally omitted. */
+
+*,
+*::before,
+*::after {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+:root {
+    --cyan: #00d4ff;
+    --magenta: #ff00aa;
+    --purple: #8844ff;
+    --bg: #000005;
+    --text: #c0e0ff;
+    --dim: #3a5a6a;
+    --success: #00ff88;
+    --danger: #ff3a3a;
+    --warning: #ffaa00;
+}
+
+html {
+    height: 100%;
+    background: transparent;
+}
+
+body {
+    height: 100%;
+    font-family: 'Rajdhani', sans-serif;
+    /* Fully transparent — the borderless window floats as just the orb (with
+       its own glow) + chrome text over the desktop. No dark backdrop. The
+       full-bleed grid + nebula are dropped (they'd reveal the window bounds). */
+    background: transparent;
+    color: var(--text);
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+/* Windowed mode (tray toggle): opaque dark HUD for sit-down use — solid
+   background + nebula, like a normal app window over any wallpaper. */
+body.windowed {
+    background: var(--bg);
+}
+body.windowed::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: -2;
+    pointer-events: none;
+    background:
+        radial-gradient(ellipse 60% 50% at 50% 50%, rgba(0, 90, 130, 0.20), transparent 70%),
+        radial-gradient(ellipse 90% 70% at 25% 85%, rgba(80, 0, 120, 0.10), transparent 60%),
+        radial-gradient(ellipse 80% 60% at 80% 15%, rgba(0, 60, 100, 0.12), transparent 60%);
+}
+
+/* <canvas> is a *replaced* element: `inset: 0` does NOT stretch it the way
+   it stretches a block box, so it keeps its intrinsic ~300x150 size and the
+   orb renders tiny in the corner. Pin the size with explicit viewport units
+   so canvas.clientWidth (read by blob.js/starfield.js) is the full window. */
+#starfield {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    display: block;
+    z-index: -1;
+    pointer-events: none;
+}
+
+#blobCanvas {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    display: block;
+    z-index: 1;
+}
+
+/* ── Top bar ─────────────────────────────────────────────────────────── */
+.top-bar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 34px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 14px;
+    z-index: 20;
+    /* Transparent: this is the floating window's only drag handle. */
+    background: transparent;
+    font-family: 'Orbitron', monospace;
+    font-size: 9px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    /* The whole bar is the window drag handle in the borderless build. */
+    -webkit-app-region: drag;
+}
+.top-bar button,
+.top-bar .status-dot { -webkit-app-region: no-drag; }
+
+.top-bar .left { color: var(--dim); }
+.top-bar .center {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    color: var(--cyan);
+    font-weight: 900;
+    font-size: 11px;
+    text-shadow: 0 0 20px rgba(0, 212, 255, 0.8);
+    letter-spacing: 4px;
+    pointer-events: none;
+}
+.top-bar .right { display: flex; gap: 14px; align-items: center; color: var(--dim); }
+
+.status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--success);
+    box-shadow: 0 0 12px var(--success);
+    animation: blink 1.5s infinite;
+}
+@keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+/* ── Orb interaction + labels ────────────────────────────────────────── */
+.blob-click-zone {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 200px;
+    height: 200px;
+    border-radius: 50%;
+    z-index: 15;
+    cursor: pointer;
+    -webkit-app-region: no-drag;
+}
+
+/* Interactive elements must opt out of the window drag region (the top bar
+   is the only drag handle in the borderless window). */
+.text-chat-panel,
+.text-chat-input,
+.text-chat-send,
+.text-chat-action,
+.sys-status {
+    -webkit-app-region: no-drag;
+}
+
+.state-label {
+    position: fixed;
+    top: calc(50% + 92px);
+    left: 50%;
+    transform: translateX(-50%);
+    font-family: 'Orbitron', monospace;
+    font-size: 11px;
+    letter-spacing: 3px;
+    color: var(--cyan);
+    text-shadow: 0 0 15px rgba(0, 212, 255, 0.6);
+    z-index: 15;
+}
+
+.output-panel {
+    position: fixed;
+    top: calc(50% + 116px);
+    bottom: 26px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 92vw;
+    text-align: center;
+    z-index: 15;
+    padding: 6px 16px;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    pointer-events: none;
+}
+.output-panel > * { pointer-events: auto; }
+
+.transcript {
+    font-size: 11px;
+    color: var(--dim);
+    font-style: italic;
+    margin-bottom: 8px;
+    min-height: 15px;
+    opacity: 0;
+    transition: opacity 0.5s ease;
+    letter-spacing: 1px;
+}
+.transcript.visible { opacity: 1; }
+
+.response {
+    font-size: 1.05rem;
+    font-weight: 300;
+    color: #fff;
+    line-height: 1.4;
+    text-shadow: 0 0 10px rgba(0, 212, 255, 0.3);
+    font-family: 'Rajdhani', sans-serif;
+    letter-spacing: 0.08em;
+    min-height: 25px;
+    max-height: 100%;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    mask-image: linear-gradient(to bottom, transparent 0, #000 56px);
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 56px);
+    animation: panOut 0.8s ease-out;
+    transition: opacity 1.5s ease;
+    opacity: 1;
+}
+.response::-webkit-scrollbar { width: 4px; }
+.response::-webkit-scrollbar-thumb { background: rgba(0, 212, 255, 0.25); border-radius: 2px; }
+.response::-webkit-scrollbar-track { background: transparent; }
+.response.hidden { opacity: 0; }
+
+@keyframes panOut {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Bottom status ───────────────────────────────────────────────────── */
+.sys-status {
+    position: fixed;
+    bottom: 18px;
+    left: 24px;
+    font-family: 'Orbitron', monospace;
+    font-size: 9px;
+    color: var(--dim);
+    z-index: 20;
+}
+#sysInfo.online       { color: var(--success); }
+#sysInfo.reconnecting { color: var(--warning); animation: flicker 1.4s infinite; }
+#sysInfo.offline      { color: var(--danger); }
+@keyframes flicker { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+
+/* ── Text chat overlay (Ctrl/Cmd+K) ──────────────────────────────────── */
+.text-chat-overlay {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 40;
+    display: none;
+    justify-content: center;
+    padding: 0 12px 12px;
+    pointer-events: none;
+}
+.text-chat-overlay.visible { display: flex; animation: chatSlideUp 0.18s ease-out; }
+@keyframes chatSlideUp { from { transform: translateY(16px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+.text-chat-panel {
+    pointer-events: auto;
+    width: min(560px, 96vw);
+    background: rgba(0, 8, 16, 0.92);
+    border: 1px solid rgba(0, 212, 255, 0.30);
+    border-radius: 10px;
+    box-shadow: 0 0 30px rgba(0, 212, 255, 0.12);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.text-chat-messages {
+    max-height: 38vh;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    scrollbar-width: thin;
+}
+.text-chat-messages::-webkit-scrollbar { width: 4px; }
+.text-chat-messages::-webkit-scrollbar-thumb { background: rgba(0, 212, 255, 0.25); border-radius: 2px; }
+
+.text-chat-empty {
+    color: var(--dim);
+    font-size: 12px;
+    text-align: center;
+    padding: 12px 0;
+    letter-spacing: 1px;
+}
+
+.text-chat-msg {
+    max-width: 85%;
+    padding: 7px 11px;
+    border-radius: 9px;
+    font-size: 14px;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+.text-chat-msg.user {
+    align-self: flex-end;
+    background: rgba(0, 212, 255, 0.14);
+    border: 1px solid rgba(0, 212, 255, 0.30);
+    color: #d8f4ff;
+}
+.text-chat-msg.kelex {
+    align-self: flex-start;
+    background: rgba(136, 68, 255, 0.10);
+    border: 1px solid rgba(136, 68, 255, 0.28);
+    color: #fff;
+}
+.text-chat-msg.error { border-color: rgba(255, 58, 58, 0.5); color: #ffb3b3; }
+
+.text-chat-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-family: 'Orbitron', monospace;
+    font-size: 10px;
+    letter-spacing: 1px;
+}
+.text-chat-status { color: var(--dim); }
+.text-chat-status.thinking { color: var(--purple); }
+.text-chat-status.error { color: var(--danger); }
+.text-chat-actions { display: flex; gap: 8px; }
+.text-chat-action {
+    background: transparent;
+    border: 1px solid rgba(0, 212, 255, 0.3);
+    color: var(--cyan);
+    font-family: 'Orbitron', monospace;
+    font-size: 10px;
+    padding: 3px 8px;
+    cursor: pointer;
+    border-radius: 4px;
+}
+.text-chat-action:hover { background: rgba(0, 212, 255, 0.1); }
+
+.text-chat-input-row { display: flex; gap: 8px; align-items: flex-end; }
+.text-chat-input {
+    flex: 1;
+    resize: none;
+    background: rgba(0, 0, 0, 0.4);
+    border: 1px solid rgba(0, 212, 255, 0.3);
+    border-radius: 8px;
+    color: #fff;
+    font-family: 'Rajdhani', sans-serif;
+    font-size: 14px;
+    padding: 9px 12px;
+    line-height: 1.4;
+    outline: none;
+}
+.text-chat-input:focus { border-color: var(--cyan); box-shadow: 0 0 12px rgba(0, 212, 255, 0.2); }
+.text-chat-input::placeholder { color: var(--dim); }
+
+.text-chat-send {
+    background: rgba(0, 212, 255, 0.15);
+    border: 1px solid rgba(0, 212, 255, 0.4);
+    color: var(--cyan);
+    border-radius: 8px;
+    width: 42px;
+    height: 40px;
+    cursor: pointer;
+    font-size: 15px;
+}
+.text-chat-send:hover { background: rgba(0, 212, 255, 0.28); }
+.text-chat-send:disabled { opacity: 0.4; cursor: default; }
+
+.text-chat-hint {
+    color: var(--dim);
+    font-size: 10px;
+    text-align: center;
+    letter-spacing: 0.5px;
+}
+
+/* ── Gear button + settings panel ────────────────────────────────────── */
+.gear-btn {
+    -webkit-app-region: no-drag;
+    background: transparent;
+    border: none;
+    color: var(--dim);
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    padding: 2px 4px;
+    transition: color 0.2s;
+}
+.gear-btn:hover { color: var(--cyan); }
+
+.settings-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 2, 6, 0.55);
+    -webkit-app-region: no-drag;
+}
+.settings-overlay.visible { display: flex; }
+
+.settings-panel {
+    width: min(380px, 92vw);
+    background: rgba(0, 8, 16, 0.97);
+    border: 1px solid rgba(0, 212, 255, 0.30);
+    border-radius: 10px;
+    box-shadow: 0 0 40px rgba(0, 212, 255, 0.15);
+    padding: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+.settings-title {
+    font-family: 'Orbitron', monospace;
+    font-size: 13px;
+    letter-spacing: 3px;
+    color: var(--cyan);
+    text-shadow: 0 0 12px rgba(0, 212, 255, 0.5);
+}
+.settings-field { display: flex; flex-direction: column; gap: 4px; }
+.settings-field > span {
+    font-family: 'Orbitron', monospace;
+    font-size: 9px;
+    letter-spacing: 1px;
+    color: var(--dim);
+    text-transform: uppercase;
+}
+.settings-field input {
+    background: rgba(0, 0, 0, 0.4);
+    border: 1px solid rgba(0, 212, 255, 0.3);
+    border-radius: 6px;
+    color: #fff;
+    font-family: 'Rajdhani', sans-serif;
+    font-size: 14px;
+    padding: 8px 10px;
+    outline: none;
+}
+.settings-field input:focus { border-color: var(--cyan); box-shadow: 0 0 10px rgba(0, 212, 255, 0.2); }
+.settings-check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text);
+    cursor: pointer;
+}
+.settings-check input { accent-color: var(--cyan); width: 15px; height: 15px; }
+.settings-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 4px; }
+.settings-actions .control-btn { padding: 8px 18px; border-radius: 6px; font-size: 11px; }
+.settings-save { border-color: var(--cyan); color: var(--cyan); }
+.settings-save:hover { background: rgba(0, 212, 255, 0.12); }
+.settings-status { font-size: 11px; min-height: 14px; color: var(--dim); letter-spacing: 0.5px; }
+.settings-status.ok { color: var(--success); }
+.settings-status.error { color: var(--danger); }
