@@ -8,9 +8,8 @@ use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
 use reqwest::cookie::{Jar, CookieStore};
-use rustls::crypto::{ring, CryptoProvider};
+use rustls::crypto::ring;
 use rustls::ClientConfig;
-use rustls::pki_types::CertificateDer;
 use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async_tls_with_config, accept_async, Connector};
 use tauri::{AppHandle, Manager};
@@ -19,18 +18,16 @@ use crate::AppState;
 
 /// Create a TLS connector that trusts system native root certificates.
 fn native_tls_connector() -> Result<Connector, String> {
-    // Ensure ring crypto provider is installed (required by rustls)
     ring::default_provider()
         .install_default()
         .map_err(|_| "Failed to install crypto provider".to_string())?;
 
     let mut root_store = rustls::RootCertStore::empty();
 
-    let native_certs = rustls_native_certs::load_native_certs()
-        .map_err(|e| format!("Failed to load native certs: {e}"))?;
+    let certs = rustls_native_certs::load_native_certs().certs;
 
     let mut added = 0;
-    for cert in native_certs {
+    for cert in certs {
         if root_store.add(cert).is_ok() {
             added += 1;
         }
