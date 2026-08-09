@@ -1,17 +1,13 @@
-// Shared mutable state for the voice loop. Trimmed port of the legacy HUD's
-// state.js — only the fields the conversation/TTS pipeline touches.
+// Shared mutable state for the voice loop + orb visualizer.
 
 export const state = {
-    // WebSocket
-    voiceWS: null,
-
     // Conversation lifecycle
     conversationActive: false,
     isListening: false,
     isProcessing: false,
     isSpeaking: false,
 
-    // Conversation mic analyser
+    // Conversation mic analyser (orb visualizer)
     audioContext: null,
     analyser: null,
     dataArray: null,
@@ -20,14 +16,12 @@ export const state = {
     recordingSamples: 0,
     instantVolume: 0,
 
-    // Mic recording
+    // Mic recording (kept for MediaRecorder ref in mic.js)
     mediaRecorder: null,
     audioChunks: [],
     currentMicStream: null,
 
     // TTS playback
-    ttsQueue: [],
-    isTTSPlaying: false,
-    currentAudio: null,
     ttsVolume: 1.0,
+    currentAudio: null,
 };

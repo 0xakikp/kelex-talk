@@ -1,14 +1,16 @@
 // Kelex — Hermes Agent Desktop Client.
 //
 // Tauri v2 orb app that connects to a Hermes Gateway backend.
+// Orb click = voice conversation (mic → Web Speech API → Hermes → TTS).
 // Ctrl/Cmd+K = text chat (Hermes JSON-RPC WebSocket).
 // Esc = interrupt / close panels.
-// Orb click placeholder (voice mode disabled until Phase 2).
 
 import { loadSettings, isWindowed, gatewayWsUrl } from './config.js';
 import { hermes } from './hermes-client.js';
 import { initUI, setState, showResponse, setUplink } from './hud/ui.js';
 import { state } from './hud/state.js';
+import { toggleConversation, isConversationActive } from './hud/mic.js';
+import { interruptResponse } from './hud/tts.js';
 import { initTextChat, toggleTextChat, closeTextChat, isTextChatOpen } from './hud/text-chat.js';
 import { initSettings, openSettings, closeSettings, isSettingsOpen } from './hud/settings.js';
 
@@ -31,26 +33,22 @@ async function connectGateway() {
 
     try {
         await hermes.connect(url);
-        // Connected
         setUplink('online', 'online');
         console.log('[kelex] Gateway connected:', url);
     } catch (e) {
         setUplink('offline', `offline — ${e.message}`);
         console.warn('[kelex] Gateway connect failed:', e.message);
-        // Auto-retry after 5s
         if (reconnectTimer) clearTimeout(reconnectTimer);
         reconnectTimer = setTimeout(connectGateway, 5000);
     }
 }
 
-// Reconnect when gateway URL changes (after settings save)
 async function reconnectGateway() {
     hermes.disconnect();
     if (reconnectTimer) clearTimeout(reconnectTimer);
     await connectGateway();
 }
 
-// Gateway state events
 hermes.onState((s) => {
     if (s === 'closed' || s === 'error') {
         setUplink('offline', 'offline — reconnecting…');
@@ -79,12 +77,11 @@ initTextChat({
     },
 });
 
-// ── Orb click — placeholder (voice mode coming in Phase 2) ─────────────
+// ── Orb click = voice conversation ────────────────────────────────────
 
 reactorCore.addEventListener('click', () => {
     if (isTextChatOpen() || isSettingsOpen()) return;
-    // Voice mode disabled — open text chat as fallback for now
-    toggleTextChat();
+    toggleConversation();
 });
 
 // ── Settings panel ────────────────────────────────────────────────────
@@ -111,6 +108,10 @@ document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
         if (isSettingsOpen()) { e.preventDefault(); closeSettings(); return; }
         if (isTextChatOpen()) { e.preventDefault(); closeTextChat(); return; }
+        if (state.isSpeaking || state.isProcessing || state.conversationActive) {
+            e.preventDefault();
+            interruptResponse();
+        }
     }
 });
 
@@ -129,7 +130,8 @@ tickClock();
 const TAURI = window.__TAURI__;
 if (TAURI?.event?.listen) {
     TAURI.event.listen('summon', () => {
-        toggleTextChat();
+        if (state.conversationActive) return;
+        toggleConversation();
     });
     TAURI.event.listen('mode', (e) => {
         document.body.classList.toggle('windowed', e.payload === 'window');
@@ -144,7 +146,6 @@ if (TAURI?.event?.listen) {
     document.body.classList.toggle('windowed', await isWindowed());
     setState('standby');
 
-    // Wire the response area's "Open Settings" link
     const responseLink = document.getElementById('responseSettingsLink');
     if (responseLink) {
         responseLink.onclick = (e) => { e.preventDefault(); openSettings(); };
@@ -158,5 +159,5 @@ if (TAURI?.event?.listen) {
         setUplink('offline', 'No gateway configured');
     }
 
-    console.log('[kelex] Online — Hermes Agent Desktop Client.');
+    console.log('[kelex] Online — Hermes Agent Desktop Client (Phase 2 voice).');
 })();

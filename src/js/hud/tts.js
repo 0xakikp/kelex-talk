@@ -1,66 +1,84 @@
-// TTS queue + playback + interrupt. Trimmed port of the legacy tts.js —
-// widget dispatch and the music queue are dropped; each chunk's base64 mp3
-// is played serially, then the conversation resumes listening.
+// TTS — browser SpeechSynthesis instead of backend audio chunks.
+// Phase 2 rebuild: the Hermes Gateway doesn't stream TTS audio natively
+// over JSON-RPC, so we use the browser's built-in speech synthesis.
+//
+// speak(text) → returns a Promise that resolves when speech finishes.
+// interrupt() → cancels any ongoing speech immediately.
 
 import { state } from './state.js';
-import { setState } from './ui.js';
-import { startListening } from './mic.js';
 
-export async function processTTSQueue() {
-    if (state.isTTSPlaying || state.ttsQueue.length === 0) return;
-    state.isTTSPlaying = true;
-    const chunk = state.ttsQueue.shift();
+let currentUtterance = null;
+let resolveOnEnd = null;
 
-    await playAudioAndWait(`data:audio/mp3;base64,${chunk.audio}`);
-
-    state.isTTSPlaying = false;
-    if (state.ttsQueue.length > 0) {
-        processTTSQueue();
-    } else {
-        state.isSpeaking = false;
-        if (state.conversationActive) setTimeout(startListening, 400);
-    }
-}
-
-function playAudioAndWait(dataUri) {
+export function speak(text) {
     return new Promise((resolve) => {
+        // Cancel any previous speech
+        interrupt();
+
+        if (!text || !window.speechSynthesis) {
+            resolve();
+            return;
+        }
+
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.rate = 1.05;   // slightly faster than default
+        utterance.pitch = 1.0;
+        utterance.volume = state.ttsVolume;
+
+        // Try to pick a good English voice
+        const voices = window.speechSynthesis.getVoices();
+        const preferred = voices.find(v =>
+            v.lang.startsWith('en') && v.name.includes('Daniel')
+        ) || voices.find(v =>
+            v.lang.startsWith('en') && v.name.includes('Samantha')
+        ) || voices.find(v =>
+            v.lang.startsWith('en-')
+        ) || voices[0];
+
+        if (preferred) utterance.voice = preferred;
+
+        currentUtterance = utterance;
         state.isSpeaking = true;
-        setState('speaking');
-        const a = new Audio(dataUri);
-        a.volume = state.ttsVolume;
-        state.currentAudio = a;
-        a.onended = a.onerror = () => {
+        state.currentAudio = { pause: () => window.speechSynthesis.cancel() }; // compat
+
+        utterance.onend = () => {
             state.isSpeaking = false;
-            if (state.currentAudio === a) state.currentAudio = null;
+            currentUtterance = null;
+            if (resolveOnEnd === resolve) resolveOnEnd = null;
             resolve();
         };
-        a.play().catch(() => {
+
+        utterance.onerror = (e) => {
+            console.warn('[tts] error:', e.error);
             state.isSpeaking = false;
-            if (state.currentAudio === a) state.currentAudio = null;
+            currentUtterance = null;
+            if (resolveOnEnd === resolve) resolveOnEnd = null;
             resolve();
-        });
+        };
+
+        resolveOnEnd = resolve;
+        window.speechSynthesis.speak(utterance);
     });
 }
 
-// Stop kelex mid-speech (Esc). Tells the server to cancel too.
-export function interruptResponse() {
-    if (!state.isSpeaking && !state.isProcessing && state.ttsQueue.length === 0) return;
-    console.log('[interrupt] user-initiated');
-
-    if (state.currentAudio) {
-        try { state.currentAudio.pause(); } catch (_) {}
-        try { state.currentAudio.src = ''; } catch (_) {}
-        state.currentAudio = null;
+export function interrupt() {
+    if (window.speechSynthesis) {
+        window.speechSynthesis.cancel();
     }
-    state.ttsQueue.length = 0;
-    state.isTTSPlaying = false;
     state.isSpeaking = false;
-    state.isProcessing = false;
-
-    if (state.voiceWS && state.voiceWS.readyState === WebSocket.OPEN) {
-        try { state.voiceWS.send(JSON.stringify({ type: 'interrupt' })); } catch (_) {}
+    currentUtterance = null;
+    if (resolveOnEnd) {
+        resolveOnEnd();
+        resolveOnEnd = null;
     }
+}
 
-    setState(state.conversationActive ? 'listening' : 'standby');
-    if (state.conversationActive) setTimeout(startListening, 300);
+// Stop kelex mid-speech (Esc). Also tells Hermes nothing — the gateway
+// doesn't support mid-stream cancellation yet; the response just gets
+// discarded client-side.
+export function interruptResponse() {
+    if (!state.isSpeaking && !state.isProcessing) return;
+    console.log('[interrupt] user-initiated');
+    interrupt();
+    state.isProcessing = false;
 }
