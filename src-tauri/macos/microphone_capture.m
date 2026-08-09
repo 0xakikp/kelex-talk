@@ -27,10 +27,21 @@ int kelex_microphone_request_access(void) {
 
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
     __block BOOL granted = NO;
-    [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(BOOL allowed) {
-        granted = allowed;
-        dispatch_semaphore_signal(done);
-    }];
+    void (^request)(void) = ^{
+        [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(BOOL allowed) {
+            granted = allowed;
+            dispatch_semaphore_signal(done);
+        }];
+    };
+
+    // TCC presents privacy UI only from the owning application's main thread.
+    // The Rust wake loop is a worker thread, so schedule the request onto the
+    // Kelex app's main queue before waiting for its completion.
+    if ([NSThread isMainThread]) {
+        request();
+    } else {
+        dispatch_async(dispatch_get_main_queue(), request);
+    }
     dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
     return granted ? 1 : 0;
 }
