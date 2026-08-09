@@ -131,6 +131,13 @@ document.addEventListener('keydown', (e) => {
         toggleTextChat();
         return;
     }
+    // Cmd/Ctrl+, = open settings (standard macOS preferences shortcut)
+    if (e.code === 'Comma' && (e.ctrlKey || e.metaKey) && !e.repeat) {
+        e.preventDefault();
+        if (isSettingsOpen()) closeSettings();
+        else openSettings();
+        return;
+    }
     if (e.key === 'Escape') {
         if (isSettingsOpen()) { e.preventDefault(); closeSettings(); return; }
         if (isTextChatOpen()) { e.preventDefault(); closeTextChat(); return; }
