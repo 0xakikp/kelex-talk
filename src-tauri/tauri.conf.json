@@ -33,7 +33,8 @@
     "active": true,
     "targets": "all",
     "macOS": {
-      "infoPlist": "Info.plist"
+      "infoPlist": "Info.plist",
+      "entitlements": "Entitlements.plist"
     },
     "icon": [
       "icons/32x32.png",
@@ -41,6 +42,9 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
+    ],
+    "externalBin": [
+      "bin/kelex_mic"
     ]
   }
 }

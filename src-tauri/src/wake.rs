@@ -99,7 +99,7 @@ pub fn set_paused(app: &AppHandle, paused: bool) {
         .store(paused, Ordering::SeqCst);
 }
 
-fn err_fn(e: cpal::StreamError) {
+fn err_fn(e: cpal::Error) {
     eprintln!("[wake] stream error: {e}");
 }
 
@@ -114,25 +114,55 @@ fn run(
     gateway_pass: String,
     http: reqwest::Client,
 ) {
-    let host = cpal::default_host();
-    let Some(device) = host.default_input_device() else {
-        eprintln!("[wake] no input device");
+    let helper = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("kelex_mic")))
+        .unwrap_or_else(|| std::path::PathBuf::from("kelex_mic"));
+
+    if !helper.exists() {
+        eprintln!("[wake] kelex_mic helper not found at {}", helper.display());
+        eprintln!("[wake] build it with: cargo build --bin kelex_mic");
         flags.running.store(false, Ordering::SeqCst);
         return;
-    };
-    let config = match device.default_input_config() {
+    }
+
+    let mut child = match std::process::Command::new(&helper)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+    {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[wake] default_input_config failed: {e}");
+            eprintln!("[wake] failed to spawn kelex_mic: {e}");
             flags.running.store(false, Ordering::SeqCst);
             return;
         }
     };
-    let sr = config.sample_rate().0 as f32;
-    let channels = config.channels() as usize;
+
+    let mut stdout = match child.stdout.take() {
+        Some(s) => std::io::BufReader::new(s),
+        None => {
+            eprintln!("[wake] kelex_mic has no stdout");
+            flags.running.store(false, Ordering::SeqCst);
+            return;
+        }
+    };
+
+    use std::io::Read;
+    let mut hdr = [0u8; 6];
+    if stdout.read_exact(&mut hdr).is_err() {
+        eprintln!("[wake] failed to read kelex_mic header");
+        let _ = child.kill();
+        flags.running.store(false, Ordering::SeqCst);
+        return;
+    }
+    let sr = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]) as f32;
+    let _channels = u16::from_le_bytes([hdr[4], hdr[5]]) as usize;
+
+    eprintln!("[wake] kelex_mic connected — sr={sr}");
+
     let (tx, rx) = mpsc::channel::<Vec<f32>>();
 
-    // Consumer: resample → WAV → route to wake-detect or conversation capture.
     {
         let flags = flags.clone();
         let app = app.clone();
@@ -144,10 +174,8 @@ fn run(
                 let pcm = resample_to_16k(&raw, sr);
                 let wav = encode_wav(&pcm);
 
-                // Check if conversation capture is active (orb-triggered voice input).
                 let cap_tx = flags.conversation_capture.lock().unwrap().take();
                 if let Some(tx) = cap_tx {
-                    // Route this utterance to /api/audio/transcribe for the orb.
                     let transcript = tauri::async_runtime::block_on(
                         transcribe_utterance(
                             &http, &transcribe_url,
@@ -156,11 +184,9 @@ fn run(
                         )
                     );
                     let _ = tx.send(transcript.unwrap_or_default());
-                    // Don't summon — the orb is already visible.
                     continue;
                 }
 
-                // Normal wake-word path.
                 let hit = tauri::async_runtime::block_on(post(&http, &wake_url, &wake_auth, wav));
                 if hit {
                     flags.paused.store(true, Ordering::SeqCst);
@@ -172,58 +198,57 @@ fn run(
         });
     }
 
-    let cfg: cpal::StreamConfig = config.clone().into();
-    let mk = |paused: Arc<AtomicBool>, tx: mpsc::Sender<Vec<f32>>| Recorder {
+    let mut rec = Recorder {
         sr,
-        channels,
-        paused,
-        tx,
+        channels: 1,
+        paused: flags.paused.clone(),
+        tx: tx.clone(),
         buf: Vec::new(),
         speech: false,
         silence: 0,
         diag_samples: 0,
         diag_max_rms: Arc::new(std::sync::Mutex::new(0.0f32)),
     };
-    let stream = match config.sample_format() {
-        SampleFormat::F32 => {
-            let mut rec = mk(flags.paused.clone(), tx.clone());
-            device.build_input_stream(&cfg, move |d: &[f32], _: &_| rec.feed_f32(d), err_fn, None)
-        }
-        SampleFormat::I16 => {
-            let mut rec = mk(flags.paused.clone(), tx.clone());
-            device.build_input_stream(&cfg, move |d: &[i16], _: &_| rec.feed_i16(d), err_fn, None)
-        }
-        SampleFormat::U16 => {
-            let mut rec = mk(flags.paused.clone(), tx.clone());
-            device.build_input_stream(&cfg, move |d: &[u16], _: &_| rec.feed_u16(d), err_fn, None)
-        }
-        other => {
-            eprintln!("[wake] unsupported sample format: {other:?}");
-            flags.running.store(false, Ordering::SeqCst);
-            return;
-        }
-    };
-    let stream = match stream {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("[wake] build_input_stream failed: {e}");
-            flags.running.store(false, Ordering::SeqCst);
-            return;
-        }
-    };
-    drop(tx); // only the recorder's clone holds a sender now
-    if let Err(e) = stream.play() {
-        eprintln!("[wake] stream.play failed: {e}");
-        flags.running.store(false, Ordering::SeqCst);
-        return;
-    }
+    drop(tx);
+
     eprintln!("[wake] listening — say \"jarvis\"");
 
-    while flags.running.load(Ordering::Relaxed) {
-        std::thread::sleep(Duration::from_millis(150));
+    let mut sample_buf = [0u8; 4 * 1024];
+    loop {
+        if !flags.running.load(Ordering::Relaxed) {
+            break;
+        }
+        match stdout.read(&mut sample_buf) {
+            Ok(0) => {
+                eprintln!("[wake] kelex_mic EOF");
+                break;
+            }
+            Ok(n) => {
+                let complete = n / 4;
+                let samples: Vec<f32> = (0..complete)
+                    .map(|i| {
+                        let off = i * 4;
+                        f32::from_le_bytes([
+                            sample_buf[off],
+                            sample_buf[off + 1],
+                            sample_buf[off + 2],
+                            sample_buf[off + 3],
+                        ])
+                    })
+                    .collect();
+                rec.feed_f32(&samples);
+            }
+            Err(e) => {
+                eprintln!("[wake] kelex_mic read error: {e}");
+                break;
+            }
+        }
     }
-    drop(stream);
+
+    let _ = child.kill();
+    let _ = child.wait();
     flags.stopped.store(true, Ordering::SeqCst);
+    flags.running.store(false, Ordering::SeqCst);
     eprintln!("[wake] stopped");
 }
 
@@ -256,7 +281,8 @@ impl Recorder {
         if self.diag_samples == 0 {
             let dev = cpal::default_host()
                 .default_input_device()
-                .map(|d| d.name().unwrap_or_else(|_| "?".into()))
+                .and_then(|d| d.description().ok())
+                .map(|desc| desc.name().to_string())
                 .unwrap_or_else(|| "none".into());
             eprintln!("[capture] first callback — device={dev}");
         }
@@ -296,6 +322,14 @@ impl Recorder {
             if rms > *max {
                 *max = rms;
             }
+        }
+        // TEMPORARY DIAG: log RMS every ~2s so we can see if mic delivers real audio.
+        if self.diag_samples % 96000 < mono.len() {
+            let paused = self.paused.load(Ordering::Relaxed);
+            eprintln!(
+                "[wake-diag] samples={} rms={rms:.6} paused={paused} speech={}",
+                self.diag_samples, self.speech
+            );
         }
 
         if !self.speech {
@@ -371,10 +405,10 @@ fn capture_utterance_wav() -> Result<Vec<u8>, String> {
     let host = cpal::default_host();
     let device = host.default_input_device().ok_or("No microphone input device")?;
     let input = device.default_input_config().map_err(|e| format!("Microphone config: {e}"))?;
-    let sr = input.sample_rate().0 as f32;
+    let sr = input.sample_rate() as f32;
     let channels = input.channels() as usize;
     let fmt = input.sample_format();
-    let cfg: cpal::StreamConfig = input.clone().into();
+    let cfg: cpal::StreamConfig = input.into();
     let (tx, rx) = mpsc::channel::<Vec<f32>>();
     let paused = Arc::new(AtomicBool::new(false));
 
@@ -399,15 +433,15 @@ fn capture_utterance_wav() -> Result<Vec<u8>, String> {
     let stream = match fmt {
         SampleFormat::F32 => {
             let mut rec = mk(tx.clone(), max_rms.clone());
-            device.build_input_stream(&cfg, move |d: &[f32], _| rec.feed_f32(d), err_fn, None)
+            device.build_input_stream(cfg.clone(), move |d: &[f32], _| rec.feed_f32(d), err_fn, None)
         }
         SampleFormat::I16 => {
             let mut rec = mk(tx.clone(), max_rms.clone());
-            device.build_input_stream(&cfg, move |d: &[i16], _| rec.feed_i16(d), err_fn, None)
+            device.build_input_stream(cfg.clone(), move |d: &[i16], _| rec.feed_i16(d), err_fn, None)
         }
         SampleFormat::U16 => {
             let mut rec = mk(tx.clone(), max_rms.clone());
-            device.build_input_stream(&cfg, move |d: &[u16], _| rec.feed_u16(d), err_fn, None)
+            device.build_input_stream(cfg.clone(), move |d: &[u16], _| rec.feed_u16(d), err_fn, None)
         }
         other => return Err(format!("Unsupported microphone sample format: {other:?}")),
     }.map_err(|e| format!("Open microphone: {e}"))?;
