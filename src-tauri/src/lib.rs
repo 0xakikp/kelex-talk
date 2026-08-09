@@ -44,6 +44,10 @@ pub struct Settings {
     pub windowed: bool,
     /// Always-on Rust-side wake word ("kelex"). Opt-in (holds the mic)
     pub wake_enabled: bool,
+    /// Last user-set window width (windowed mode)
+    pub window_width: f64,
+    /// Last user-set window height (windowed mode)
+    pub window_height: f64,
 }
 
 impl Default for Settings {
@@ -55,6 +59,8 @@ impl Default for Settings {
             hotkey: "CmdOrCtrl+Shift+J".into(),
             windowed: true,
             wake_enabled: false,
+            window_width: 520.0,
+            window_height: 680.0,
         }
     }
 }
@@ -147,11 +153,12 @@ fn apply_orb_mode(w: &WebviewWindow) {
     let _ = w.emit("mode", "orb");
 }
 
-fn apply_window_mode(w: &WebviewWindow) {
+fn apply_window_mode(w: &WebviewWindow, width: f64, height: f64) {
     let _ = w.set_decorations(true);
     let _ = w.set_shadow(true);
-    let _ = w.set_size(LogicalSize::new(WINDOW_SIZE.0, WINDOW_SIZE.1));
-    center_on_primary(w, WINDOW_SIZE);
+    let size = (width, height);
+    let _ = w.set_size(LogicalSize::new(size.0, size.1));
+    center_on_primary(w, size);
     let _ = w.show();
     let _ = w.set_focus();
     let _ = w.emit("mode", "window");
@@ -258,6 +265,24 @@ pub fn run() {
                 api.prevent_close();
                 let _ = window.hide();
             }
+            // Save window size when the user finishes resizing (debounced).
+            if let WindowEvent::Resized(size) = event {
+                let app = window.app_handle();
+                let st = app.state::<AppState>();
+                let w = size.width as f64 / window.scale_factor().unwrap_or(1.0);
+                let h = size.height as f64 / window.scale_factor().unwrap_or(1.0);
+                let mut s = st.settings.lock().unwrap();
+                if (s.window_width - w).abs() > 1.0 || (s.window_height - h).abs() > 1.0 {
+                    s.window_width = w;
+                    s.window_height = h;
+                    // Only persist if in windowed mode (orb size is fixed)
+                    if s.windowed {
+                        if let Ok(json) = serde_json::to_string_pretty(&*s) {
+                            let _ = std::fs::write(&st.config_path, json);
+                        }
+                    }
+                }
+            }
         })
         .setup(|app| {
             // Settings persistence.
@@ -342,7 +367,8 @@ pub fn run() {
                         });
                         if let Some(w) = app.get_webview_window("main") {
                             if windowed {
-                                apply_window_mode(&w);
+                                let s = app.state::<AppState>().settings.lock().unwrap();
+                                apply_window_mode(&w, s.window_width, s.window_height);
                             } else {
                                 apply_orb_mode(&w);
                             }
@@ -387,7 +413,7 @@ pub fn run() {
             // Apply remembered window mode at startup.
             if let Some(w) = app.get_webview_window("main") {
                 if windowed {
-                    apply_window_mode(&w);
+                    apply_window_mode(&w, settings.window_width, settings.window_height);
                 } else {
                     apply_orb_mode(&w);
                 }
