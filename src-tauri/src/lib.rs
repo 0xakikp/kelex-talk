@@ -61,7 +61,26 @@ impl Default for Settings {
 
 pub struct AppState {
     settings: Mutex<Settings>,
+    http: reqwest::Client,
     config_path: PathBuf,
+}
+
+impl AppState {
+    /// Build a full URL from the gateway base + path, and a basic-auth header value.
+    fn endpoint(&self, path: &str) -> (String, String) {
+        let s = self.settings.lock().unwrap();
+        let base = s.gateway_url.trim_end_matches('/');
+        let url = format!("{base}{path}");
+        // Build basic auth token: base64(user:pass)
+        let auth = if !s.username.is_empty() || !s.password_hash.is_empty() {
+            use base64::{Engine as _, engine::general_purpose::STANDARD};
+            let creds = format!("{}:{}", s.username, s.password_hash);
+            STANDARD.encode(creds.as_bytes())
+        } else {
+            String::new()
+        };
+        (url, auth)
+    }
 }
 
 /// Live native-window state + the tray menu item handles we need to update.
@@ -252,6 +271,7 @@ pub fn run() {
 
             app.manage(AppState {
                 settings: Mutex::new(settings),
+                http: reqwest::Client::new(),
                 config_path,
             });
             app.manage(WakeFlags::new());

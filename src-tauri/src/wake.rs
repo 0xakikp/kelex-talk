@@ -59,10 +59,10 @@ pub fn start(app: &AppHandle) {
     flags.paused.store(false, Ordering::SeqCst);
 
     let st = app.state::<AppState>();
-    let (url, token) = st.endpoint("/api/wake-detect");
+    let (url, auth) = st.endpoint("/api/wake-detect");
     let http = st.http.clone();
     let app = app.clone();
-    std::thread::spawn(move || run(app, flags, url, token, http));
+    std::thread::spawn(move || run(app, flags, url, auth, http));
 }
 
 pub fn stop(app: &AppHandle) {
@@ -80,7 +80,7 @@ fn err_fn(e: cpal::StreamError) {
     eprintln!("[wake] stream error: {e}");
 }
 
-fn run(app: AppHandle, flags: WakeFlags, url: String, token: String, http: reqwest::Client) {
+fn run(app: AppHandle, flags: WakeFlags, url: String, auth: String, http: reqwest::Client) {
     let host = cpal::default_host();
     let Some(device) = host.default_input_device() else {
         eprintln!("[wake] no input device");
@@ -110,7 +110,7 @@ fn run(app: AppHandle, flags: WakeFlags, url: String, token: String, http: reqwe
                 }
                 let pcm = resample_to_16k(&raw, sr);
                 let wav = encode_wav(&pcm);
-                let hit = tauri::async_runtime::block_on(post(&http, &url, &token, wav));
+                let hit = tauri::async_runtime::block_on(post(&http, &url, &auth, wav));
                 if hit {
                     flags.paused.store(true, Ordering::SeqCst); // hush during the turn
                     let a = app.clone();
@@ -290,7 +290,7 @@ fn encode_wav(samples: &[i16]) -> Vec<u8> {
 }
 
 /// POST the WAV to /api/wake-detect. Returns true on wake + voiceprint match.
-async fn post(http: &reqwest::Client, url: &str, token: &str, wav: Vec<u8>) -> bool {
+async fn post(http: &reqwest::Client, url: &str, auth: &str, wav: Vec<u8>) -> bool {
     let part = match reqwest::multipart::Part::bytes(wav)
         .file_name("wake.wav")
         .mime_str("audio/wav")
@@ -300,8 +300,8 @@ async fn post(http: &reqwest::Client, url: &str, token: &str, wav: Vec<u8>) -> b
     };
     let form = reqwest::multipart::Form::new().part("audio", part);
     let mut req = http.post(url).multipart(form);
-    if !token.is_empty() {
-        req = req.header("X-Internal-Token", token);
+    if !auth.is_empty() {
+        req = req.header("Authorization", format!("Basic {auth}"));
     }
     match req.send().await {
         Ok(resp) => match resp.json::<serde_json::Value>().await {
