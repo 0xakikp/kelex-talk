@@ -15,7 +15,7 @@ private let outputQueue = DispatchQueue(label: "in.akikp.kelex.mic-output", qos:
 
 private func diagnostic(_ message: String) {
     guard let data = message.data(using: .utf8) else { return }
-    try? stderr.write(contentsOf: data)
+    stderr.write(data)
 }
 
 private func requireMicrophoneAccess() -> Bool {
@@ -44,7 +44,7 @@ private func writeHeader(sampleRate: Double) {
     var data = Data()
     withUnsafeBytes(of: &rate) { data.append(contentsOf: $0) }
     withUnsafeBytes(of: &channels) { data.append(contentsOf: $0) }
-    try? stdout.write(contentsOf: data)
+    stdout.write(data)
 }
 
 private func monoData(_ buffer: AVAudioPCMBuffer) -> Data? {
@@ -99,7 +99,7 @@ input.installTap(onBus: 0, bufferSize: 1024, format: tapFormat) { buffer, _ in
     // dispatching so pipe backpressure can never retain CoreAudio memory.
     guard let pcm = monoData(buffer) else { return }
     outputQueue.async {
-        try? stdout.write(contentsOf: pcm)
+        stdout.write(pcm)
     }
 }
 
