@@ -5,6 +5,6 @@
     <!-- Required for WKWebView getUserMedia (voice conversation). Without
          this, macOS denies/crashes on first mic access. -->
     <key>NSMicrophoneUsageDescription</key>
-    <string>kelex-talk uses the microphone for voice conversation with kelex.</string>
+    <string>Kelex uses the microphone for hands-free conversations with your Hermes Agent.</string>
 </dict>
 </plist>
