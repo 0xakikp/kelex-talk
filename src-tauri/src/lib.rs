@@ -293,6 +293,8 @@ pub fn run() {
             let hotkey = settings.hotkey.clone();
             let windowed = settings.windowed;
             let wake_enabled = settings.wake_enabled;
+            let win_w = settings.window_width;
+            let win_h = settings.window_height;
 
             app.manage(AppState {
                 settings: Mutex::new(settings),
@@ -367,7 +369,8 @@ pub fn run() {
                         });
                         if let Some(w) = app.get_webview_window("main") {
                             if windowed {
-                                let s = app.state::<AppState>().settings.lock().unwrap();
+                                let st = app.state::<AppState>();
+                                let s = st.settings.lock().unwrap();
                                 apply_window_mode(&w, s.window_width, s.window_height);
                             } else {
                                 apply_orb_mode(&w);
@@ -413,7 +416,7 @@ pub fn run() {
             // Apply remembered window mode at startup.
             if let Some(w) = app.get_webview_window("main") {
                 if windowed {
-                    apply_window_mode(&w, settings.window_width, settings.window_height);
+                    apply_window_mode(&w, win_w, win_h);
                 } else {
                     apply_orb_mode(&w);
                 }
