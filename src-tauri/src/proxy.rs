@@ -10,13 +10,34 @@ use futures_util::{SinkExt, StreamExt};
 use reqwest::cookie::Jar;
 use reqwest::cookie::CookieStore;
 use tokio::net::{TcpListener, TcpStream};
-use tokio_tungstenite::{connect_async, accept_async, MaybeTlsStream, WebSocketStream, tungstenite::Message};
+use tokio_tungstenite::{connect_async_tls_with_config, accept_async, MaybeTlsStream, WebSocketStream, tungstenite::Message};
+use tokio_tungstenite::Connector;
 use tauri::{AppHandle, Manager};
 
 use crate::AppState;
 
-type WsWrite = futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
-type WsRead = futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
+/// Create a TLS connector that trusts system native root certificates.
+fn native_tls_connector() -> Result<Connector, String> {
+    let mut root_store = tokio_tungstenite::tungstenite::tls::rustls::RootCertStore::empty();
+    
+    // Load native certs (macOS Keychain, Linux /etc/ssl, etc.)
+    let native_certs = rustls_native_certs::load_native_certs()
+        .map_err(|e| format!("Failed to load native certs: {e}"))?;
+    
+    let mut added = 0;
+    for cert in native_certs {
+        if root_store.add(cert).is_ok() {
+            added += 1;
+        }
+    }
+    eprintln!("[proxy] Loaded {added} native root certificates");
+
+    let config = tokio_tungstenite::tungstenite::tls::rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+
+    Ok(Connector::Rustls(Arc::new(config)))
+}
 
 /// Start the WebSocket proxy. Returns the local WebSocket URL.
 pub async fn start_proxy(app: AppHandle) -> Result<String, String> {
@@ -57,7 +78,7 @@ pub async fn start_proxy(app: AppHandle) -> Result<String, String> {
             login_resp.text().await.unwrap_or_default()));
     }
 
-    eprintln!("[proxy] Login OK, connecting to Hermes WS");
+    eprintln!("[proxy] Login OK");
 
     // Step 2: Connect to Hermes WebSocket with session cookie
     let host = base.trim_start_matches("https://").trim_start_matches("http://");
@@ -66,7 +87,7 @@ pub async fn start_proxy(app: AppHandle) -> Result<String, String> {
 
     let ws_url: url::Url = ws_url_str.parse().map_err(|e| format!("Bad URL: {e}"))?;
 
-    // Build request with Cookie header from cookie jar
+    // Build request with Cookie header
     let mut req_builder = tokio_tungstenite::tungstenite::http::Request::builder()
         .uri(ws_url.as_str())
         .header("Host", ws_url.host_str().unwrap_or(""));
@@ -80,12 +101,14 @@ pub async fn start_proxy(app: AppHandle) -> Result<String, String> {
     }
 
     let ws_request = req_builder.body(()).map_err(|e| format!("WS request build: {e}"))?;
+
+    let connector = native_tls_connector()?;
     
-    eprintln!("[proxy] Connecting to {ws_url_str} with cookie...");
-    let (remote_ws, _) = connect_async(ws_request)
+    eprintln!("[proxy] Connecting to {ws_url_str}...");
+    let (remote_ws, _) = connect_async_tls_with_config(ws_request, None, false, Some(connector))
         .await
         .map_err(|e| format!("Hermes WS connect failed: {e}"))?;
-    
+
     eprintln!("[proxy] Hermes WS connected!");
 
     let (mut remote_tx, mut remote_rx) = remote_ws.split();
@@ -100,9 +123,7 @@ pub async fn start_proxy(app: AppHandle) -> Result<String, String> {
 
     eprintln!("[proxy] Local WS on 127.0.0.1:{local_port}");
 
-    // Spawn proxy task
     tauri::async_runtime::spawn(async move {
-        // Accept one local connection
         let (stream, _) = match listener.accept().await {
             Ok(c) => c,
             Err(e) => { eprintln!("[proxy] Accept: {e}"); return; }
@@ -115,7 +136,6 @@ pub async fn start_proxy(app: AppHandle) -> Result<String, String> {
 
         let (mut local_tx, mut local_rx) = local_ws.split();
 
-        // local → remote
         let t1 = tokio::spawn(async move {
             while let Some(msg) = local_rx.next().await {
                 match msg {
@@ -125,7 +145,6 @@ pub async fn start_proxy(app: AppHandle) -> Result<String, String> {
             }
         });
 
-        // remote → local
         let t2 = tokio::spawn(async move {
             while let Some(msg) = remote_rx.next().await {
                 match msg {
@@ -135,7 +154,6 @@ pub async fn start_proxy(app: AppHandle) -> Result<String, String> {
             }
         });
 
-        // Wait for either direction to close
         tokio::select! {
             _ = t1 => {},
             _ = t2 => {},
