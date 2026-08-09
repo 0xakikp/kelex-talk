@@ -1,41 +1,24 @@
 // WebSocket proxy: bridges the Tauri webview to Hermes Gateway.
 //
-// WebKit's ITP blocks third-party cookies from iframes, so the
-// webview can't authenticate with Hermes directly. Instead:
-//
-//   1. Rust logs into Hermes via reqwest (cookie jar works)
-//   2. Rust connects to Hermes WebSocket with the session cookie
-//   3. Rust starts a local WS server for the webview
-//   4. Messages flow bidirectionally: webview ↔ local WS ↔ Hermes WS
-//
-// The webview connects to ws://127.0.0.1:<port> with no auth needed.
+// Rust handles login + WebSocket with cookies (reqwest cookie jar),
+// then exposes a local WS server for the webview. This bypasses
+// WebKit's third-party cookie restrictions entirely.
 
-use std::net::TcpListener;
 use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
 use reqwest::cookie::Jar;
-use tokio::net::TcpStream;
-use tokio::sync::Mutex;
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{connect_async, accept_async, MaybeTlsStream};
+use tokio::net::{TcpListener, TcpStream};
+use tokio_tungstenite::{connect_async, accept_async, MaybeTlsStream, WebSocketStream, tungstenite::Message};
 use tauri::AppHandle;
 
 use crate::AppState;
 
-type WsStream = tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>;
+type WsWrite = futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
+type WsRead = futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
 
-/// Shared state for the proxy: the remote Hermes WS sender, protected by a mutex
-/// so the local→remote forwarding loop can push messages into it.
-struct ProxyState {
-    remote_tx: Mutex<Option<futures_util::stream::SplitSink<WsStream, Message>>>,
-}
-
-/// Start the WebSocket proxy. Returns the local WebSocket URL the frontend
-/// should connect to (e.g. ws://127.0.0.1:PORT).
-pub async fn start_proxy(
-    app: AppHandle,
-) -> Result<String, String> {
+/// Start the WebSocket proxy. Returns the local WebSocket URL.
+pub async fn start_proxy(app: AppHandle) -> Result<String, String> {
     let state = app.state::<AppState>();
     let (gateway_url, username, password) = {
         let s = state.settings.lock().unwrap();
@@ -48,12 +31,12 @@ pub async fn start_proxy(
 
     let base = gateway_url.trim_end_matches('/').to_string();
 
-    // --- Step 1: Login and get session cookie ---
+    // Step 1: Login to Hermes and get session cookie
     let cookie_jar = Arc::new(Jar::default());
     let client = reqwest::Client::builder()
         .cookie_provider(cookie_jar.clone())
         .build()
-        .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
+        .map_err(|e| format!("HTTP client: {e}"))?;
 
     let login_resp = client
         .post(format!("{base}/auth/password-login"))
@@ -65,130 +48,96 @@ pub async fn start_proxy(
         }))
         .send()
         .await
-        .map_err(|e| format!("Login request failed: {e}"))?;
+        .map_err(|e| format!("Login failed: {e}"))?;
 
     if !login_resp.status().is_success() {
         let status = login_resp.status();
-        let body = login_resp.text().await.unwrap_or_default();
-        return Err(format!("Login failed ({}): {}", status.as_u16(), body));
+        return Err(format!("Login failed ({}): {}", status.as_u16(),
+            login_resp.text().await.unwrap_or_default()));
     }
 
-    eprintln!("[proxy] Login successful, connecting to Hermes WS");
+    eprintln!("[proxy] Login OK, connecting to Hermes WS");
 
-    // --- Step 2: Connect to remote Hermes WebSocket ---
-    let ws_url = format!("{}s://{}/api/ws",
-        if base.starts_with("https") { "wss" } else { "ws" },
-        base.trim_start_matches("https://").trim_start_matches("http://")
-    );
+    // Step 2: Connect to Hermes WebSocket with session cookie
+    let host = base.trim_start_matches("https://").trim_start_matches("http://");
+    let ws_scheme = if base.starts_with("https") { "wss" } else { "ws" };
+    let ws_url_str = format!("{ws_scheme}://{host}/api/ws");
 
-    // Build WebSocket request with cookies from cookie jar
-    let mut ws_request = tokio_tungstenite::tungstenite::http::Request::builder()
-        .uri(&ws_url)
-        .header("Host", ws_url.split("://").nth(1).unwrap_or("").split('/').next().unwrap_or(""));
+    let ws_url: url::Url = ws_url_str.parse().map_err(|e| format!("Bad URL: {e}"))?;
 
-    // Add cookies
-    if let Some(cookie_header) = cookie_jar.cookies(&ws_url.parse().map_err(|e| format!("Bad URL: {e}"))?) {
-        let cookie_str: String = cookie_header.to_str().map_err(|e| format!("Cookie header error: {e}"))?.into();
-        if !cookie_str.is_empty() {
-            ws_request = ws_request.header("Cookie", cookie_str);
+    // Build request with Cookie header from cookie jar
+    let mut req_builder = tokio_tungstenite::tungstenite::http::Request::builder()
+        .uri(ws_url.as_str())
+        .header("Host", ws_url.host_str().unwrap_or(""));
+
+    if let Some(cookie_header) = cookie_jar.cookies(&ws_url) {
+        if let Ok(cookie_str) = cookie_header.to_str() {
+            if !cookie_str.is_empty() {
+                req_builder = req_builder.header("Cookie", cookie_str);
+            }
         }
     }
 
-    let ws_request = ws_request.body(()).map_err(|e| format!("WS request error: {e}"))?;
-
+    let ws_request = req_builder.body(()).map_err(|e| format!("WS request: {e}"))?;
     let (remote_ws, _) = connect_async(ws_request)
         .await
-        .map_err(|e| format!("WebSocket connection failed: {e}"))?;
+        .map_err(|e| format!("Hermes WS connect failed: {e}"))?;
 
-    let (remote_tx, mut remote_rx) = remote_ws.split();
+    let (mut remote_tx, mut remote_rx) = remote_ws.split();
 
-    let proxy = Arc::new(ProxyState {
-        remote_tx: Mutex::new(Some(remote_tx)),
-    });
-
-    // --- Step 3: Start local WebSocket server ---
+    // Step 3: Start local WS server
     let listener = TcpListener::bind("127.0.0.1:0")
-        .map_err(|e| format!("Failed to bind local port: {e}"))?;
-    let local_port = listener.local_addr().map_err(|e| format!("Failed to get port: {e}"))?.port();
+        .await
+        .map_err(|e| format!("Bind failed: {e}"))?;
 
-    eprintln!("[proxy] Local WS server on port {}", local_port);
+    let local_port = listener.local_addr()
+        .map_err(|e| format!("Port error: {e}"))?.port();
 
-    let proxy_clone = proxy.clone();
-    let app_handle = app.clone();
+    eprintln!("[proxy] Local WS on 127.0.0.1:{local_port}");
 
-    // Spawn the proxy in a background task
+    // Spawn proxy task
     tauri::async_runtime::spawn(async move {
-        // Accept ONE local connection from the webview
-        let (stream, _) = match listener.accept() {
+        // Accept one local connection
+        let (stream, _) = match listener.accept().await {
             Ok(c) => c,
-            Err(e) => {
-                eprintln!("[proxy] Accept error: {e}");
-                return;
-            }
+            Err(e) => { eprintln!("[proxy] Accept: {e}"); return; }
         };
 
         let local_ws = match accept_async(stream).await {
             Ok(ws) => ws,
-            Err(e) => {
-                eprintln!("[proxy] Local WS upgrade failed: {e}");
-                return;
-            }
+            Err(e) => { eprintln!("[proxy] Upgrade: {e}"); return; }
         };
 
         let (mut local_tx, mut local_rx) = local_ws.split();
 
-        // Forward local → remote
-        let proxy_for_rx = proxy_clone.clone();
-        let local_to_remote = tokio::spawn(async move {
+        // local → remote
+        let t1 = tokio::spawn(async move {
             while let Some(msg) = local_rx.next().await {
                 match msg {
-                    Ok(msg) => {
-                        let tx = proxy_for_rx.remote_tx.lock().await;
-                        if let Some(ref mut tx) = *tx {
-                            if let Err(e) = tx.send(msg).await {
-                                eprintln!("[proxy] Forward to remote failed: {e}");
-                                break;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("[proxy] Local read error: {e}");
-                        break;
-                    }
+                    Ok(m) => { if remote_tx.send(m).await.is_err() { break; } }
+                    Err(_) => break,
                 }
             }
         });
 
-        // Forward remote → local
-        let remote_to_local = tokio::spawn(async move {
+        // remote → local
+        let t2 = tokio::spawn(async move {
             while let Some(msg) = remote_rx.next().await {
                 match msg {
-                    Ok(msg) => {
-                        if let Err(e) = local_tx.send(msg).await {
-                            eprintln!("[proxy] Forward to local failed: {e}");
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("[proxy] Remote read error: {e}");
-                        break;
-                    }
+                    Ok(m) => { if local_tx.send(m).await.is_err() { break; } }
+                    Err(_) => break,
                 }
             }
         });
 
-        // Wait for either direction to end
+        // Wait for either direction to close
         tokio::select! {
-            _ = local_to_remote => {},
-            _ = remote_to_local => {},
+            _ = t1 => {},
+            _ = t2 => {},
         }
 
-        eprintln!("[proxy] Connection closed");
-
-        // Clean up
-        let mut tx = proxy_clone.remote_tx.lock().await;
-        *tx = None;
+        eprintln!("[proxy] Disconnected");
     });
 
-    Ok(format!("ws://127.0.0.1:{}", local_port))
+    Ok(format!("ws://127.0.0.1:{local_port}"))
 }
