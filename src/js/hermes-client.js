@@ -1,10 +1,9 @@
-// Hermes Gateway JSON-RPC 2.0 WebSocket client with automatic login.
+// Hermes Gateway JSON-RPC 2.0 WebSocket client.
 //
-// The Hermes backend requires session-cookie auth for /api/ws.
-// This client:
-//  1. POSTs a hidden form to /auth/password-login via an iframe
-//     (cookies are set natively in the Tauri webview's cookie jar)
-//  2. Connects WebSocket — browser auto-includes the session cookie
+// Auth flow:
+//  1. Show a full-screen iframe with the Hermes login page
+//  2. User logs in natively → cookies set in webview
+//  3. WebSocket connection auto-includes those cookies
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 
@@ -24,79 +23,53 @@ export class HermesClient {
   // ── Login ─────────────────────────────────────────────────────────────
 
   /**
-   * Authenticate via hidden form POST → iframe.
-   * This is the ONLY way to set cross-origin session cookies in a Tauri
-   * webview (fetch() can't, popups can't). The form POSTs to
-   * /auth/password-login, the server responds with Set-Cookie headers,
-   * and the browser stores them. Subsequent WebSocket connections to the
-   * same domain auto-include those cookies.
+   * Show the Hermes login page in a full-window iframe.
+   * Returns a Promise that resolves when the user has logged in
+   * (detected by redirect away from /login).
    */
-  async login(gatewayUrl, username, password) {
+  login(gatewayUrl) {
     const base = gatewayUrl.replace(/\/+$/, '');
     this._baseUrl = base;
 
-    try {
-      await new Promise((resolve, reject) => {
-        // Create hidden iframe
-        const iframe = document.createElement('iframe');
-        iframe.name = 'hermes_login_frame';
-        iframe.style.display = 'none';
-        iframe.sandbox = 'allow-forms allow-same-origin';
-        document.body.appendChild(iframe);
+    return new Promise((resolve, reject) => {
+      // Create full-screen iframe
+      const iframe = document.createElement('iframe');
+      iframe.id = 'hermes-login-iframe';
+      iframe.src = `${base}/login`;
+      iframe.style.cssText = `
+        position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+        border: none; z-index: 99999; background: #0a0a0a;
+      `;
+      document.body.appendChild(iframe);
 
-        // Create form targeting the iframe
-        const form = document.createElement('form');
-        form.method = 'POST';
-        form.action = `${base}/auth/password-login`;
-        form.target = 'hermes_login_frame';
-        form.style.display = 'none';
+      let loadCount = 0;
 
-        const addField = (n, v) => {
-          const input = document.createElement('input');
-          input.type = 'hidden';
-          input.name = n;
-          input.value = v;
-          form.appendChild(input);
-        };
-        addField('provider', 'basic');
-        addField('username', username);
-        addField('password', password);
-        addField('next', '');
+      const timeout = setTimeout(() => {
+        cleanup();
+        reject(new Error('Login timed out'));
+      }, 120000);
 
-        document.body.appendChild(form);
+      const cleanup = () => {
+        clearTimeout(timeout);
+        try { document.body.removeChild(iframe); } catch (_) {}
+      };
 
-        // Resolve when the iframe finishes loading
-        const timeout = setTimeout(() => {
-          cleanup();
-          resolve(true); // assume success on timeout
-        }, 8000);
-
-        iframe.onload = () => {
-          clearTimeout(timeout);
+      // onload fires on every navigation:
+      // 1st: login page loads
+      // 2nd: login succeeds → redirect to /
+      iframe.onload = () => {
+        loadCount++;
+        if (loadCount >= 2) {
           cleanup();
           resolve(true);
-        };
+        }
+      };
 
-        iframe.onerror = () => {
-          clearTimeout(timeout);
-          cleanup();
-          resolve(true); // assume success — error might be redirect
-        };
-
-        const cleanup = () => {
-          try { document.body.removeChild(form); } catch (_) {}
-          try { document.body.removeChild(iframe); } catch (_) {}
-        };
-
-        form.submit();
-      });
-
-      console.log('[hermes] Login form submitted');
-      return true;
-    } catch (e) {
-      console.error('[hermes] Login error:', e.message);
-      throw e;
-    }
+      iframe.onerror = () => {
+        cleanup();
+        reject(new Error('Login page failed to load'));
+      };
+    });
   }
 
   // ── Connection ──────────────────────────────────────────────────────
@@ -127,7 +100,6 @@ export class HermesClient {
 
     return new Promise((resolve, reject) => {
       let settled = false;
-
       const onOpen = () => {
         if (settled) return;
         settled = true;
@@ -142,7 +114,6 @@ export class HermesClient {
         this._setState('error');
         reject(new Error('WebSocket connection failed'));
       };
-
       socket.addEventListener('open', onOpen, { once: true });
       socket.addEventListener('error', onError, { once: true });
     });
@@ -163,26 +134,14 @@ export class HermesClient {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       return Promise.reject(new Error('Gateway not connected'));
     }
-
     const id = 'r' + (++this._nextId);
     const payload = JSON.stringify({ jsonrpc: '2.0', id, method, params });
-
     return new Promise((resolve, reject) => {
       const timer = timeoutMs > 0
-        ? setTimeout(() => {
-            this._pending.delete(id);
-            reject(new Error(`Request timed out: ${method}`));
-          }, timeoutMs)
+        ? setTimeout(() => { this._pending.delete(id); reject(new Error(`Request timed out: ${method}`)); }, timeoutMs)
         : null;
-
       this._pending.set(id, { resolve, reject, timer });
-
-      try {
-        socket.send(payload);
-      } catch (e) {
-        this._clearPending(id);
-        reject(e);
-      }
+      try { socket.send(payload); } catch (e) { this._clearPending(id); reject(e); }
     });
   }
 
@@ -190,16 +149,11 @@ export class HermesClient {
 
   on(eventType, handler) {
     let set = this._handlers.get(eventType);
-    if (!set) {
-      set = new Set();
-      this._handlers.set(eventType, set);
-    }
+    if (!set) { set = new Set(); this._handlers.set(eventType, set); }
     set.add(handler);
     return () => set.delete(handler);
   }
-
   onAny(handler) { return this.on('*', handler); }
-
   onState(handler) {
     this._stateHandlers.add(handler);
     handler(this._state);
@@ -217,7 +171,6 @@ export class HermesClient {
   _onMessage(raw) {
     let frame;
     try { frame = JSON.parse(typeof raw === 'string' ? raw : String(raw)); } catch { return; }
-
     if (frame.id !== undefined && frame.id !== null) {
       const call = this._pending.get(frame.id);
       if (!call) return;
@@ -226,7 +179,6 @@ export class HermesClient {
       else call.resolve(frame.result);
       return;
     }
-
     if (frame.method === 'event' && frame.params?.type) {
       const evt = frame.params;
       const specific = this._handlers.get(evt.type);

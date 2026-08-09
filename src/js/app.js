@@ -34,13 +34,11 @@ async function connectGateway() {
     }
 
     try {
-        // Step 1: Login to get session cookie
-        if (auth.username && auth.password) {
-            setUplink('connecting', 'logging in…');
-            await hermes.login(gw, auth.username, auth.password);
-        }
+        // Show login page in full-window iframe
+        setUplink('connecting', 'open login page…');
+        await hermes.login(gw);
 
-        // Step 2: Connect WebSocket
+        // Connect WebSocket (cookies now in webview)
         setUplink('connecting', 'connecting…');
         await hermes.connect(wsUrl);
         setUplink('online', 'online');
