@@ -10,6 +10,7 @@ use reqwest::cookie::{Jar, CookieStore};
 use rustls::{ClientConfig, crypto::ring};
 use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async_tls_with_config, accept_async, Connector};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tauri::{AppHandle, Manager};
 
 use crate::AppState;
@@ -90,14 +91,20 @@ pub async fn start_proxy(app: AppHandle) -> Result<String, String> {
     let ws_url = format!("{ws_scheme}://{host}/api/ws?ticket={}", 
         urlencoding::encode(ticket));
 
+    // CRITICAL: convert the URL with IntoClientRequest. It creates the
+    // mandatory Upgrade, Connection, Sec-WebSocket-Version and fresh
+    // Sec-WebSocket-Key headers. A bare Request::builder() does not.
+    let ws_request = ws_url
+        .into_client_request()
+        .map_err(|e| format!("WS request build: {e}"))?;
+
     let connector = native_connector()?;
-    eprintln!("[proxy] Connecting to Hermes WS...");
+    eprintln!("[proxy] Connecting to Hermes WS with signed ticket...");
     let (remote_ws, _) = connect_async_tls_with_config(
-        tokio_tungstenite::tungstenite::http::Request::builder()
-            .uri(&ws_url)
-            .body(())
-            .map_err(|e| format!("req: {e}"))?,
-        None, false, Some(connector),
+        ws_request,
+        None,
+        false,
+        Some(connector),
     )
     .await
     .map_err(|e| format!("WS connect: {e}"))?;
