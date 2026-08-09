@@ -82,7 +82,8 @@ export function activateConversation() {
     setTimeout(startListening, 900);
 }
 
-export function deactivateConversation() {
+export function deactivateConversation(options = {}) {
+    const { announce = true } = options;
     state.conversationActive = false;
     state.isListening = false;
     state.isProcessing = false;
@@ -96,7 +97,7 @@ export function deactivateConversation() {
     ttsInterrupt();
 
     setState('standby');
-    showResponse('System in standby mode.');
+    if (announce) showResponse('System in standby mode.');
     wakeResume();
 }
 
@@ -166,8 +167,10 @@ export function startListening() {
     rec.onerror = (event) => {
         console.warn('[conv] SpeechRecognition error:', event.error);
         if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
-            showResponse(`Speech recognition denied (${event.error}). Check macOS Microphone and Speech Recognition permissions for Kelex.`);
-            deactivateConversation();
+            const reason = `Speech recognition denied (${event.error}). macOS grants Microphone and Speech Recognition separately — enable Kelex under System Settings → Privacy & Security → Speech Recognition.`;
+            console.error('[conv]', reason);
+            deactivateConversation({ announce: false });
+            showResponse(reason);
             return;
         }
         // no-speech / aborted are normal loop conditions
