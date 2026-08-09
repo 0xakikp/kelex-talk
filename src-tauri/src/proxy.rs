@@ -79,10 +79,14 @@ pub async fn start_proxy(app: AppHandle) -> Result<String, String> {
         }
     }
 
-    let ws_request = req_builder.body(()).map_err(|e| format!("WS request: {e}"))?;
+    let ws_request = req_builder.body(()).map_err(|e| format!("WS request build: {e}"))?;
+    
+    eprintln!("[proxy] Connecting to {ws_url_str} with cookie...");
     let (remote_ws, _) = connect_async(ws_request)
         .await
         .map_err(|e| format!("Hermes WS connect failed: {e}"))?;
+    
+    eprintln!("[proxy] Hermes WS connected!");
 
     let (mut remote_tx, mut remote_rx) = remote_ws.split();
 

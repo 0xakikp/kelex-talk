@@ -48,8 +48,9 @@ async function connectGateway() {
         setUplink('online', 'online');
         console.log('[kelex] Connected via proxy:', localUrl);
     } catch (e) {
-        setUplink('offline', `offline — ${e.message}`);
-        console.warn('[kelex] Gateway connect failed:', e.message);
+        const msg = typeof e === 'string' ? e : (e.message || String(e));
+        setUplink('offline', `offline — ${msg}`);
+        console.warn('[kelex] Gateway connect failed:', msg);
         if (reconnectTimer) clearTimeout(reconnectTimer);
         reconnectTimer = setTimeout(connectGateway, 5000);
     }
