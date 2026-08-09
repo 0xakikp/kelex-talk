@@ -7,11 +7,22 @@ use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
 use reqwest::cookie::{Jar, CookieStore};
+use rustls::ClientConfig;
 use tokio::net::TcpListener;
-use tokio_tungstenite::{connect_async, accept_async};
+use tokio_tungstenite::{connect_async_tls_with_config, accept_async, Connector};
 use tauri::{AppHandle, Manager};
 
 use crate::AppState;
+
+fn native_connector() -> Result<Connector, String> {
+    let mut roots = rustls::RootCertStore::empty();
+    let certs = rustls_native_certs::load_native_certs().certs;
+    for c in certs { let _ = roots.add(c); }
+    let config = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(Connector::Rustls(Arc::new(config)))
+}
 
 pub async fn start_proxy(app: AppHandle) -> Result<String, String> {
     let state = app.state::<AppState>();
@@ -74,10 +85,17 @@ pub async fn start_proxy(app: AppHandle) -> Result<String, String> {
     let ws_url = format!("{ws_scheme}://{host}/api/ws?ticket={}", 
         urlencoding::encode(ticket));
 
+    let connector = native_connector()?;
     eprintln!("[proxy] Connecting to Hermes WS...");
-    let (remote_ws, _) = connect_async(&ws_url)
-        .await
-        .map_err(|e| format!("WS connect: {e}"))?;
+    let (remote_ws, _) = connect_async_tls_with_config(
+        tokio_tungstenite::tungstenite::http::Request::builder()
+            .uri(&ws_url)
+            .body(())
+            .map_err(|e| format!("req: {e}"))?,
+        None, false, Some(connector),
+    )
+    .await
+    .map_err(|e| format!("WS connect: {e}"))?;
 
     eprintln!("[proxy] Hermes WS connected!");
 
