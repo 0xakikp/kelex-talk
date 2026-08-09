@@ -223,14 +223,20 @@ fn set_wake(app: AppHandle, state: State<'_, AppState>, enabled: bool) -> Result
     Ok(())
 }
 
+/// Fully stop the native wake listener before WKWebView requests the mic.
+/// A mere "pause" leaves CPAL holding the macOS input device, which causes
+/// navigator.mediaDevices.getUserMedia() to fail with NotAllowedError.
 #[tauri::command]
 fn wake_pause(app: AppHandle) {
-    wake::set_paused(&app, true);
+    wake::stop(&app);
 }
 
+/// Restart native wake listening only when the user has it enabled.
 #[tauri::command]
-fn wake_resume(app: AppHandle) {
-    wake::set_paused(&app, false);
+fn wake_resume(app: AppHandle, state: State<'_, AppState>) {
+    if state.settings.lock().unwrap().wake_enabled {
+        wake::start(&app);
+    }
 }
 
 #[tauri::command]

@@ -50,8 +50,9 @@ export function activateConversation() {
     wakePause();
     showResponse('Online and ready, sir.');
     setState('listening');
-
-    // Subscribe to Hermes streaming events for the voice loop
+    // wakePause() stops the native CPAL stream; give macOS time to release
+    // the hardware before WKWebView calls getUserMedia.
+    setTimeout(startListening, 900);
     let streamed = '';
     hermesUnsub = hermes.onAny((evt) => {
         switch (evt.type) {
@@ -87,8 +88,6 @@ export function activateConversation() {
                 break;
         }
     });
-
-    setTimeout(startListening, 600);
 }
 
 export function deactivateConversation() {
