@@ -19,6 +19,10 @@ use crate::AppState;
 fn native_tls_connector() -> Result<Connector, String> {
     let mut root_store = rustls::RootCertStore::empty();
 
+    // Ensure a crypto provider is available (reqwest may have set one up).
+    // `install_default()` returns Err if already installed — that's fine.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let certs = rustls_native_certs::load_native_certs().certs;
 
     let mut added = 0;
