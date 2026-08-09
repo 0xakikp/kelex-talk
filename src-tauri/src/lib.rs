@@ -223,12 +223,22 @@ fn set_wake(app: AppHandle, state: State<'_, AppState>, enabled: bool) -> Result
     Ok(())
 }
 
-/// Fully stop the native wake listener before WKWebView requests the mic.
-/// A mere "pause" leaves CPAL holding the macOS input device, which causes
-/// navigator.mediaDevices.getUserMedia() to fail with NotAllowedError.
+/// Fully stop the native wake listener and WAIT for its CPAL stream to
+/// release.  Without waiting, the next capture_and_transcribe opens a
+/// second AudioUnit on the same device while the first is still shutting
+/// down — CoreAudio returns silence on the second stream.
 #[tauri::command]
-fn wake_pause(app: AppHandle) {
+async fn wake_pause(app: AppHandle) {
     wake::stop(&app);
+    // Poll until the wake thread drops its CPAL stream (max 3 s).
+    let flags = app.state::<WakeFlags>().inner().clone();
+    for _ in 0..30 {
+        if flags.stopped.load(Ordering::SeqCst) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    eprintln!("[wake_pause] timed out waiting for wake thread to stop");
 }
 
 /// Restart native wake listening only when the user has it enabled.

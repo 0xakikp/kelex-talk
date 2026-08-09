@@ -39,6 +39,9 @@ const WAKE_WORDS: [&str; 16] = [
 pub struct WakeFlags {
     running: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
+    /// Set by the wake thread AFTER the CPAL stream is fully dropped.
+    /// wake_pause polls this to know when it's safe to open a new stream.
+    pub stopped: Arc<AtomicBool>,
 }
 
 impl WakeFlags {
@@ -46,6 +49,7 @@ impl WakeFlags {
         Self {
             running: Arc::new(AtomicBool::new(false)),
             paused: Arc::new(AtomicBool::new(false)),
+            stopped: Arc::new(AtomicBool::new(true)), // true = not running yet
         }
     }
 }
@@ -57,6 +61,7 @@ pub fn start(app: &AppHandle) {
         return;
     }
     flags.paused.store(false, Ordering::SeqCst);
+    flags.stopped.store(false, Ordering::SeqCst);
 
     let st = app.state::<AppState>();
     let (url, auth) = st.endpoint("/api/wake-detect");
@@ -172,6 +177,7 @@ fn run(app: AppHandle, flags: WakeFlags, url: String, auth: String, http: reqwes
         std::thread::sleep(Duration::from_millis(150));
     }
     drop(stream);
+    flags.stopped.store(true, Ordering::SeqCst);
     eprintln!("[wake] stopped");
 }
 
