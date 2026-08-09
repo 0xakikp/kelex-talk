@@ -1,6 +1,9 @@
 // Bridge to the Rust shell. Centralizes every call into Tauri so the rest
-// of the frontend never touches window.__TAURI__ directly. HTTP to the kelex
-// backend is proxied through Rust commands (CORS-free); see src-tauri/lib.rs.
+// of the frontend never touches window.__TAURI__ directly.
+//
+// Hermes Gateway settings are persisted via Rust (settings.json) and the
+// WebSocket connection is made directly from the webview (no Rust proxy
+// needed — Hermes Gateway ships proper CORS/WS support).
 
 const TAURI = window.__TAURI__;
 const invoke = TAURI?.core?.invoke;
@@ -9,36 +12,68 @@ if (!invoke) {
     console.error('[config] window.__TAURI__ unavailable — running outside Tauri?');
 }
 
-// ── Settings (backend URL / token / hotkey) ─────────────────────────────
+// ── Settings (Hermes Gateway) ─────────────────────────────────────────
+
 let _settings = null;
 
 export async function getSettings() {
     return invoke('get_settings');
 }
+
 export async function setSettings(settings) {
     _settings = settings;
     return invoke('set_settings', { settings });
 }
-// Load once at startup and cache so sync helpers (voiceWsUrl) can build URLs.
+
+/** Load once at startup and cache. */
 export async function loadSettings() {
     _settings = await getSettings();
     return _settings;
 }
-export function backendUrl() {
-    return (_settings && _settings.backend_url) || 'http://localhost:7777';
-}
-// ws://host:port/ws/voice derived from the configured backend URL.
-export function voiceWsUrl() {
-    const base = backendUrl().replace(/^http/i, 'ws').replace(/\/+$/, '');
-    return base + '/ws/voice';
+
+/** Hermes Gateway backend URL (e.g. https://hermes-gateway.akikp.in). */
+export function gatewayUrl() {
+    return (_settings && _settings.gateway_url) || '';
 }
 
-// Current window mode (true = decorated/opaque windowed, false = orb).
+/** Basic auth credentials for gateway. */
+export function gatewayAuth() {
+    return {
+        username: (_settings && _settings.username) || '',
+        password: (_settings && _settings.password_hash) || '',
+    };
+}
+
+/** Full WebSocket URL with embedded basic auth. */
+export function gatewayWsUrl() {
+    const u = gatewayUrl();
+    if (!u) return '';
+    const auth = gatewayAuth();
+    let base = u.replace(/\/+$/, '');
+    // Build wss://user:pass@host/rpc
+    let wsBase;
+    if (base.startsWith('https://')) {
+        wsBase = 'wss://' + base.slice(8);
+    } else if (base.startsWith('http://')) {
+        wsBase = 'ws://' + base.slice(7);
+    } else {
+        wsBase = 'wss://' + base;
+    }
+    if (auth.username && auth.password) {
+        const host = wsBase.replace(/^wss?:\/\//, '');
+        return 'wss://' + encodeURIComponent(auth.username) + ':' + encodeURIComponent(auth.password) + '@' + host + '/rpc';
+    }
+    return wsBase + '/rpc';
+}
+
+// ── Window mode ───────────────────────────────────────────────────────
+
 export async function isWindowed() {
     try { return await invoke('is_windowed'); } catch { return false; }
 }
 
-// Autostart-at-login.
+// ── Autostart ─────────────────────────────────────────────────────────
+
 export async function getAutostart() {
     try { return await invoke('get_autostart'); } catch { return false; }
 }
@@ -46,12 +81,14 @@ export async function setAutostart(enabled) {
     return invoke('set_autostart', { enabled });
 }
 
-// Native OS notification (used for proactive kelex alerts).
+// ── Notifications ─────────────────────────────────────────────────────
+
 export async function notify(title, body) {
     try { return await invoke('notify', { title, body }); } catch (e) { console.warn('[notify]', e); }
 }
 
-// Always-on wake word (Rust/cpal).
+// ── Wake word ─────────────────────────────────────────────────────────
+
 export async function setWake(enabled) {
     return invoke('set_wake', { enabled });
 }
@@ -62,24 +99,12 @@ export async function wakeResume() {
     try { await invoke('wake_resume'); } catch (_) {}
 }
 
-// ── Backend calls (proxied through Rust) ────────────────────────────────
-export async function health() {
-    try { return await invoke('health'); } catch { return false; }
-}
+// ── Session id ────────────────────────────────────────────────────────
 
-// POST /api/chat -> { reply, actions }
-export async function chat(message) {
-    return invoke('chat', { message, session: sessionId() });
-}
-
-// ── Session id ──────────────────────────────────────────────────────────
-// Stable per-install id so the backend keeps conversation context across
-// app restarts. The legacy HUD used "__default__"; we namespace the desktop
-// client so it doesn't collide with browser sessions.
 export function sessionId() {
     let id = localStorage.getItem('kelex_session');
     if (!id) {
-        id = 'desktop-' + Math.random().toString(36).slice(2, 10);
+        id = 'kelex-' + Math.random().toString(36).slice(2, 10);
         localStorage.setItem('kelex_session', id);
     }
     return id;

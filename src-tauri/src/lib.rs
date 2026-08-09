@@ -1,9 +1,9 @@
-// kelex-talk — Rust shell.
+// Kelex — Hermes Agent Desktop Client (Rust shell).
 //
-// kelex-talk holds no AI logic; it proxies HTTP to the kelex backend and
-// hosts the native window/tray/hotkey features. HTTP is proxied here (rather
-// than fetched from the webview) because the backend ships no CORS headers,
-// which would block a `tauri://localhost` fetch.
+// Holds no AI logic. Manages native window/tray/hotkey features and
+// persists Hermes Gateway connection settings. The webview talks
+// directly to the Hermes Gateway backend over WebSocket (no Rust proxy
+// needed — Hermes Gateway handles CORS/WS natively).
 
 mod wake;
 
@@ -28,26 +28,30 @@ const ORB_SIZE: (f64, f64) = (340.0, 400.0);
 const WINDOW_SIZE: (f64, f64) = (520.0, 680.0);
 
 /// User-configurable connection + UX settings, persisted to
-/// `<app_config_dir>/settings.json`; the settings panel (M5) edits these.
+/// `<app_config_dir>/settings.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    pub backend_url: String,
-    pub token: String,
-    /// Global summon / push-to-talk shortcut. Tauri accelerator syntax.
+    /// Hermes Gateway backend URL (e.g. https://hermes-gateway.akikp.in)
+    pub gateway_url: String,
+    /// Basic auth username
+    pub username: String,
+    /// Basic auth password (stored as plaintext for now; hash in future)
+    pub password_hash: String,
+    /// Global summon hotkey (Tauri accelerator syntax)
     pub hotkey: String,
-    /// Remembered window mode — true = decorated/opaque windowed, false = orb.
-    /// Starts windowed by default and persists the user's manual tray switch.
+    /// Remembered window mode — true = decorated/opaque windowed, false = orb
     pub windowed: bool,
-    /// Always-on Rust-side wake word ("jarvis"). Opt-in (holds the mic).
+    /// Always-on Rust-side wake word ("kelex"). Opt-in (holds the mic)
     pub wake_enabled: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            backend_url: "http://localhost:7777".into(),
-            token: "bigflix_internal_secret_2026".into(),
+            gateway_url: String::new(),
+            username: String::new(),
+            password_hash: String::new(),
             hotkey: "CmdOrCtrl+Shift+J".into(),
             windowed: true,
             wake_enabled: false,
@@ -57,22 +61,13 @@ impl Default for Settings {
 
 pub struct AppState {
     settings: Mutex<Settings>,
-    http: reqwest::Client,
     config_path: PathBuf,
-}
-
-impl AppState {
-    fn endpoint(&self, path: &str) -> (String, String) {
-        let s = self.settings.lock().unwrap();
-        let base = s.backend_url.trim_end_matches('/');
-        (format!("{base}{path}"), s.token.clone())
-    }
 }
 
 /// Live native-window state + the tray menu item handles we need to update.
 struct Native {
     always_on_top: AtomicBool,
-    windowed: AtomicBool, // false = floating orb mode
+    windowed: AtomicBool,
     aot_item: CheckMenuItem<Wry>,
     mode_item: MenuItem<Wry>,
     wake_item: CheckMenuItem<Wry>,
@@ -85,7 +80,7 @@ fn load_settings(path: &PathBuf) -> Settings {
         .unwrap_or_default()
 }
 
-// ── Window helpers ──────────────────────────────────────────────────────
+// ── Window helpers ────────────────────────────────────────────────────
 
 fn summon(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
@@ -108,10 +103,6 @@ fn toggle_window(app: &AppHandle) {
     }
 }
 
-/// Center the window on the *primary* monitor (the one with the menu bar),
-/// not whatever display it happened to spawn on. `w.center()` centers on the
-/// current monitor, which on a multi-display setup can be the external screen
-/// the user isn't looking at — leaving the window seemingly "not showing".
 fn center_on_primary(w: &WebviewWindow, size: (f64, f64)) {
     if let Ok(Some(mon)) = w.primary_monitor() {
         let mpos = mon.position();
@@ -127,10 +118,9 @@ fn center_on_primary(w: &WebviewWindow, size: (f64, f64)) {
     }
 }
 
-/// Compact, borderless, transparent floating orb.
 fn apply_orb_mode(w: &WebviewWindow) {
     let _ = w.set_decorations(false);
-    let _ = w.set_shadow(false); // no rectangular shadow around the invisible window
+    let _ = w.set_shadow(false);
     let _ = w.set_size(LogicalSize::new(ORB_SIZE.0, ORB_SIZE.1));
     center_on_primary(w, ORB_SIZE);
     let _ = w.show();
@@ -138,7 +128,6 @@ fn apply_orb_mode(w: &WebviewWindow) {
     let _ = w.emit("mode", "orb");
 }
 
-/// Larger, decorated, opaque window for "sit down and use it" sessions.
 fn apply_window_mode(w: &WebviewWindow) {
     let _ = w.set_decorations(true);
     let _ = w.set_shadow(true);
@@ -149,16 +138,13 @@ fn apply_window_mode(w: &WebviewWindow) {
     let _ = w.emit("mode", "window");
 }
 
-// ── Commands ────────────────────────────────────────────────────────────
+// ── Commands ──────────────────────────────────────────────────────────
 
 #[tauri::command]
 fn get_settings(state: State<'_, AppState>) -> Settings {
     state.settings.lock().unwrap().clone()
 }
 
-/// Frontend queries this on load so the windowed/orb look survives a webview
-/// re-init (otherwise the body class is lost and a decorated window renders
-/// transparent — the "translucent windowed" glitch).
 #[tauri::command]
 fn is_windowed(native: State<'_, Native>) -> bool {
     native.windowed.load(Ordering::Relaxed)
@@ -175,7 +161,7 @@ fn set_settings(
     // Re-register the global hotkey live in case it changed.
     let _ = app.global_shortcut().unregister_all();
     if let Err(e) = app.global_shortcut().register(settings.hotkey.as_str()) {
-        eprintln!("[kelex-talk] hotkey '{}' register failed: {e}", settings.hotkey);
+        eprintln!("[kelex] hotkey '{}' register failed: {e}", settings.hotkey);
     }
     *state.settings.lock().unwrap() = settings;
     Ok(())
@@ -192,7 +178,6 @@ fn set_autostart(app: AppHandle, enabled: bool) -> Result<(), String> {
     if enabled { mgr.enable() } else { mgr.disable() }.map_err(|e| e.to_string())
 }
 
-/// Enable/disable the always-on wake word + persist the choice.
 #[tauri::command]
 fn set_wake(app: AppHandle, state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
     {
@@ -211,18 +196,16 @@ fn set_wake(app: AppHandle, state: State<'_, AppState>, enabled: bool) -> Result
     Ok(())
 }
 
-/// Hush/resume the wake listener (webview calls these around a conversation
-/// so the always-on mic doesn't fight getUserMedia).
 #[tauri::command]
 fn wake_pause(app: AppHandle) {
     wake::set_paused(&app, true);
 }
+
 #[tauri::command]
 fn wake_resume(app: AppHandle) {
     wake::set_paused(&app, false);
 }
 
-/// Show a native OS notification (used for proactive kelex alerts).
 #[tauri::command]
 fn notify(app: AppHandle, title: String, body: String) -> Result<(), String> {
     app.notification()
@@ -231,40 +214,6 @@ fn notify(app: AppHandle, title: String, body: String) -> Result<(), String> {
         .body(body)
         .show()
         .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn health(state: State<'_, AppState>) -> Result<bool, String> {
-    let (url, _) = state.endpoint("/health");
-    match state.http.get(&url).send().await {
-        Ok(resp) => Ok(resp.status().is_success()),
-        Err(_) => Ok(false),
-    }
-}
-
-/// POST /api/chat — {message, session_id} -> {reply, actions}.
-#[tauri::command]
-async fn chat(
-    state: State<'_, AppState>,
-    message: String,
-    session: Option<String>,
-) -> Result<serde_json::Value, String> {
-    let (url, token) = state.endpoint("/api/chat");
-    let mut body = serde_json::json!({ "message": message });
-    if let Some(sid) = session {
-        body["session_id"] = serde_json::Value::String(sid);
-    }
-    let mut req = state.http.post(&url).json(&body);
-    if !token.is_empty() {
-        req = req.header("X-Internal-Token", token);
-    }
-    let resp = req.send().await.map_err(|e| format!("request failed: {e}"))?;
-    let status = resp.status();
-    let val: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("bad response ({status}): {e}"))?;
-    Ok(val)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -286,15 +235,13 @@ pub fn run() {
                 .build(),
         )
         .on_window_event(|window, event| {
-            // Tray-resident app: closing the window (red X in windowed mode)
-            // hides it instead of quitting. Quit is via the tray menu.
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
             }
         })
         .setup(|app| {
-            // Settings + HTTP client.
+            // Settings persistence.
             let dir = app.path().app_config_dir().expect("resolve app config dir");
             std::fs::create_dir_all(&dir).ok();
             let config_path = dir.join("settings.json");
@@ -302,18 +249,18 @@ pub fn run() {
             let hotkey = settings.hotkey.clone();
             let windowed = settings.windowed;
             let wake_enabled = settings.wake_enabled;
+
             app.manage(AppState {
                 settings: Mutex::new(settings),
-                http: reqwest::Client::new(),
                 config_path,
             });
             app.manage(WakeFlags::new());
 
             if let Err(e) = app.global_shortcut().register(hotkey.as_str()) {
-                eprintln!("[kelex-talk] failed to register hotkey '{hotkey}': {e}");
+                eprintln!("[kelex] failed to register hotkey '{hotkey}': {e}");
             }
 
-            // Tray menu: Show/Hide, Always-on-top (check), Orb⇄Window mode, Quit.
+            // Tray menu.
             let toggle_item =
                 MenuItem::with_id(app, "toggle", "Show / Hide", true, None::<&str>)?;
             let aot_item =
@@ -326,7 +273,7 @@ pub fn run() {
                 MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
             let sep = PredefinedMenuItem::separator(app)?;
             let quit_item =
-                MenuItem::with_id(app, "quit", "Quit kelex-talk", true, None::<&str>)?;
+                MenuItem::with_id(app, "quit", "Quit Kelex", true, None::<&str>)?;
             let menu = Menu::with_items(
                 app,
                 &[&toggle_item, &aot_item, &mode_item, &wake_item, &settings_item, &sep, &quit_item],
@@ -342,7 +289,7 @@ pub fn run() {
 
             TrayIconBuilder::with_id("main-tray")
                 .icon(app.default_window_icon().unwrap().clone())
-                .tooltip("kelex-talk")
+                .tooltip("Kelex")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
@@ -380,7 +327,6 @@ pub fn run() {
                                 apply_orb_mode(&w);
                             }
                         }
-                        // Persist the manual choice so it survives restarts.
                         let st = app.state::<AppState>();
                         let mut s = st.settings.lock().unwrap();
                         s.windowed = windowed;
@@ -418,7 +364,7 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // Apply the remembered window mode at startup (default: windowed).
+            // Apply remembered window mode at startup.
             if let Some(w) = app.get_webview_window("main") {
                 if windowed {
                     apply_window_mode(&w);
@@ -427,7 +373,7 @@ pub fn run() {
                 }
             }
 
-            // Start the always-on wake word if the user enabled it.
+            // Start wake word if enabled.
             if wake_enabled {
                 wake::start(&app.handle());
             }
@@ -444,8 +390,6 @@ pub fn run() {
             wake_pause,
             wake_resume,
             notify,
-            health,
-            chat
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

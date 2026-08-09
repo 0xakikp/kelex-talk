@@ -1,58 +1,107 @@
-// kelex-talk entry point.
+// Kelex — Hermes Agent Desktop Client.
 //
-// M1: orb. M2: text chat -> /api/chat. M3: voice — mic -> /ws/voice -> TTS.
-// Orb click toggles a hands-free voice conversation; Ctrl/Cmd+K is text chat;
-// Esc interrupts kelex mid-speech (or closes the chat panel).
+// Tauri v2 orb app that connects to a Hermes Gateway backend.
+// Ctrl/Cmd+K = text chat (Hermes JSON-RPC WebSocket).
+// Esc = interrupt / close panels.
+// Orb click placeholder (voice mode disabled until Phase 2).
 
-import { health, loadSettings, isWindowed } from './config.js';
+import { loadSettings, isWindowed, gatewayWsUrl } from './config.js';
+import { hermes } from './hermes-client.js';
 import { initUI, setState, showResponse, setUplink } from './hud/ui.js';
 import { state } from './hud/state.js';
-import { initVoiceWS } from './hud/ws.js';
-import { toggleConversation, activateConversation } from './hud/mic.js';
-import { interruptResponse } from './hud/tts.js';
-import {
-    initTextChat, toggleTextChat, closeTextChat, isTextChatOpen,
-} from './hud/text-chat.js';
-import {
-    initSettings, openSettings, closeSettings, isSettingsOpen,
-} from './hud/settings.js';
+import { initTextChat, toggleTextChat, closeTextChat, isTextChatOpen } from './hud/text-chat.js';
+import { initSettings, openSettings, closeSettings, isSettingsOpen } from './hud/settings.js';
 
 const clockEl = document.getElementById('clock');
 const reactorCore = document.getElementById('reactorCore');
 
 initUI();
 
-// ── Text chat (HTTP /api/chat) ──────────────────────────────────────────
+// ── Hermes Gateway connection ─────────────────────────────────────────
+
+let reconnectTimer = null;
+
+async function connectGateway() {
+    const url = gatewayWsUrl();
+    if (!url) {
+        setUplink('offline', 'No gateway configured — open Settings');
+        return;
+    }
+    setUplink('connecting', 'connecting…');
+
+    try {
+        await hermes.connect(url);
+        // Connected
+        setUplink('online', 'online');
+        console.log('[kelex] Gateway connected:', url);
+    } catch (e) {
+        setUplink('offline', `offline — ${e.message}`);
+        console.warn('[kelex] Gateway connect failed:', e.message);
+        // Auto-retry after 5s
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(connectGateway, 5000);
+    }
+}
+
+// Reconnect when gateway URL changes (after settings save)
+async function reconnectGateway() {
+    hermes.disconnect();
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    await connectGateway();
+}
+
+// Gateway state events
+hermes.onState((s) => {
+    if (s === 'closed' || s === 'error') {
+        setUplink('offline', 'offline — reconnecting…');
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(connectGateway, 3000);
+    }
+});
+
+// ── Text chat ─────────────────────────────────────────────────────────
+
 let chatRevert = null;
+
 initTextChat({
-    onState: (s) => { if (!state.conversationActive) setState(s); },
-    onReply: (reply) => {
-        showResponse(reply);
+    onState: (s) => {
         if (!state.conversationActive) {
-            setState('speaking');
-            clearTimeout(chatRevert);
-            chatRevert = setTimeout(() => setState('standby'), 1600);
+            if (s === 'processing') setState('processing');
+            else if (s === 'standby') {
+                setState('speaking');
+                clearTimeout(chatRevert);
+                chatRevert = setTimeout(() => setState('standby'), 1600);
+            }
         }
+    },
+    onReply: (reply) => {
+        if (reply) showResponse(reply);
     },
 });
 
-// ── Orb click = toggle voice conversation ───────────────────────────────
+// ── Orb click — placeholder (voice mode coming in Phase 2) ─────────────
+
 reactorCore.addEventListener('click', () => {
-    if (isTextChatOpen() || isSettingsOpen()) return; // don't start voice while busy
-    toggleConversation();
+    if (isTextChatOpen() || isSettingsOpen()) return;
+    // Voice mode disabled — open text chat as fallback for now
+    toggleTextChat();
 });
 
-// ── Settings panel — reconnect voice WS if the backend URL changed ──────
+// ── Settings panel ────────────────────────────────────────────────────
+
 initSettings({
     onSaved: async (prev, next) => {
-        if (prev.backend_url !== next.backend_url) {
+        if (prev.gateway_url !== next.gateway_url ||
+            prev.username !== next.username ||
+            prev.password_hash !== next.password_hash) {
             await loadSettings();
-            if (state.voiceWS) { try { state.voiceWS.close(); } catch (_) {} } // onclose reconnects
+            reconnectGateway();
         }
     },
 });
 
-// ── Keyboard ────────────────────────────────────────────────────────────
+// ── Keyboard ──────────────────────────────────────────────────────────
+
 document.addEventListener('keydown', (e) => {
     if (e.code === 'KeyK' && (e.ctrlKey || e.metaKey) && !e.repeat) {
         e.preventDefault();
@@ -62,21 +111,11 @@ document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
         if (isSettingsOpen()) { e.preventDefault(); closeSettings(); return; }
         if (isTextChatOpen()) { e.preventDefault(); closeTextChat(); return; }
-        if (state.isSpeaking || state.isProcessing || state.ttsQueue.length > 0) {
-            e.preventDefault();
-            interruptResponse();
-        }
     }
 });
 
-// ── UPLINK indicator — health poll, but let the live WS own the label ────
-async function pollHealth() {
-    if (state.voiceWS && state.voiceWS.readyState === WebSocket.OPEN) return;
-    const ok = await health();
-    setUplink(ok ? 'online' : 'offline', ok ? 'online · localhost:7777' : 'offline');
-}
-
 // ── Clock ─────────────────────────────────────────────────────────────
+
 function tickClock() {
     clockEl.textContent = new Date().toLocaleTimeString([], {
         hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
@@ -85,28 +124,32 @@ function tickClock() {
 setInterval(tickClock, 1000);
 tickClock();
 
-// ── Boot ─────────────────────────────────────────────────────────────
-// Global summon hotkey (registered in Rust) emits "summon" → push-to-talk.
+// ── Tauri events ──────────────────────────────────────────────────────
+
 const TAURI = window.__TAURI__;
 if (TAURI?.event?.listen) {
     TAURI.event.listen('summon', () => {
-        if (!state.conversationActive) activateConversation();
+        toggleTextChat();
     });
-    // Tray "Switch to window/orb mode" — toggle the opaque windowed look.
     TAURI.event.listen('mode', (e) => {
         document.body.classList.toggle('windowed', e.payload === 'window');
     });
-    // Tray "Settings…" / ⚙ button.
     TAURI.event.listen('open-settings', () => openSettings());
 }
 
+// ── Boot ──────────────────────────────────────────────────────────────
+
 (async () => {
-    await loadSettings();   // cache backend URL so voiceWsUrl() resolves
-    // Restore windowed/orb look in case the webview re-initialized.
+    await loadSettings();
     document.body.classList.toggle('windowed', await isWindowed());
-    initVoiceWS();          // open /ws/voice
-    pollHealth();
-    setInterval(pollHealth, 5000);
     setState('standby');
-    console.log('[kelex-talk] M4 online — floating orb, tray, global hotkey (Cmd/Ctrl+Shift+J).');
+
+    const gw = gatewayWsUrl();
+    if (gw) {
+        await connectGateway();
+    } else {
+        setUplink('offline', 'No gateway configured — open Settings (⚙)');
+    }
+
+    console.log('[kelex] Online — Hermes Agent Desktop Client.');
 })();

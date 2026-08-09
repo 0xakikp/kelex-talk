@@ -415,6 +415,11 @@ body.windowed::after {
     color: var(--cyan);
     text-shadow: 0 0 12px rgba(0, 212, 255, 0.5);
 }
+.settings-divider {
+    height: 1px;
+    background: rgba(0, 212, 255, 0.15);
+    margin: 8px 0;
+}
 .settings-field { display: flex; flex-direction: column; gap: 4px; }
 .settings-field > span {
     font-family: 'Orbitron', monospace;

@@ -1,9 +1,8 @@
-// Settings panel — edit backend URL / token / global hotkey + autostart.
-// Backed by the Rust get_settings/set_settings/get_autostart/set_autostart
-// commands. Saving re-registers the global hotkey live (Rust side) and the
-// host app reconnects the voice WS if the backend URL changed.
+// Settings panel — configure Hermes Gateway connection + app prefs.
+// Persisted via Rust get_settings/set_settings. Saving triggers a
+// reconnect to the new gateway URL if it changed.
 
-import { getSettings, setSettings, getAutostart, setAutostart, setWake } from '../config.js';
+import { getSettings, setSettings, getAutostart, setAutostart, setWake, gatewayUrl } from '../config.js';
 
 const els = {};
 let onSaved = () => {};
@@ -12,14 +11,15 @@ function $(id) { return document.getElementById(id); }
 
 export async function openSettings() {
     const s = await getSettings();
-    els.backendUrl.value = s.backend_url || '';
-    els.token.value = s.token || '';
+    els.gatewayUrl.value = s.gateway_url || '';
+    els.username.value = s.username || '';
+    els.password.value = ''; // never echo the stored hash
     els.hotkey.value = s.hotkey || '';
     els.autostart.checked = await getAutostart();
     els.wake.checked = !!s.wake_enabled;
     setStatus('');
     els.overlay.classList.add('visible');
-    setTimeout(() => els.backendUrl.focus(), 30);
+    setTimeout(() => els.gatewayUrl.focus(), 30);
 }
 
 export function closeSettings() {
@@ -37,18 +37,28 @@ function setStatus(text, cls) {
 
 async function save() {
     const prev = await getSettings();
+    const pwd = els.password.value.trim();
+
     const next = {
-        backend_url: els.backendUrl.value.trim() || 'http://localhost:7777',
-        token: els.token.value,
+        gateway_url: els.gatewayUrl.value.trim(),
+        username: els.username.value.trim(),
+        // Only update password if the user typed something new.
+        // Blank means "keep the existing one".
+        password_hash: pwd || prev.password_hash,
         hotkey: els.hotkey.value.trim() || 'CmdOrCtrl+Shift+J',
-        windowed: prev.windowed,          // preserve the remembered mode
-        wake_enabled: prev.wake_enabled,  // preserve; setWake() owns changes
+        windowed: prev.windowed,
+        wake_enabled: prev.wake_enabled,
     };
+
+    if (!next.gateway_url) {
+        setStatus('Gateway URL is required', 'error');
+        return;
+    }
+
     setStatus('Saving…');
     try {
         await setSettings(next);
         await setAutostart(els.autostart.checked);
-        // Wake word start/stop is a side-effecting toggle — only fire on change.
         if (els.wake.checked !== prev.wake_enabled) await setWake(els.wake.checked);
         setStatus('Saved ✓', 'ok');
         onSaved(prev, next);
@@ -61,8 +71,9 @@ async function save() {
 export function initSettings(hooks = {}) {
     onSaved = hooks.onSaved || onSaved;
     els.overlay = $('settingsOverlay');
-    els.backendUrl = $('setBackendUrl');
-    els.token = $('setToken');
+    els.gatewayUrl = $('setGatewayUrl');
+    els.username = $('setUsername');
+    els.password = $('setPassword');
     els.hotkey = $('setHotkey');
     els.autostart = $('setAutostart');
     els.wake = $('setWake');
@@ -72,7 +83,6 @@ export function initSettings(hooks = {}) {
     $('btnSettingsCancel').onclick = closeSettings;
     $('btnSettingsGear').onclick = openSettings;
 
-    // Esc closes the panel when it's open.
     els.overlay.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') { e.stopPropagation(); closeSettings(); }
     });

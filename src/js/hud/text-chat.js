@@ -1,15 +1,16 @@
-// Text chat overlay (Ctrl/Cmd+K). Milestone 2: POSTs to /api/chat via the
-// Rust proxy and renders the reply. No streaming/TTS yet — the WS streaming
-// path (text_chat_delta) lands with the voice work in M3.
+// Text chat overlay (Ctrl/Cmd+K). Talks to Hermes Gateway via the
+// hermes-client.js singleton. Streaming: appends text deltas as they
+// arrive, shows a thinking indicator while the agent works.
 
-import { chat } from '../config.js';
+import { hermes } from '../hermes-client.js';
+import { sessionId } from '../config.js';
 
 const els = {};
 let open = false;
 let busy = false;
+let currentStreamMsg = null; // DOM node being streamed into
+let unsubscribe = null;     // event handler cleanup
 
-// Optional hooks the host app wires in so the orb + center response mirror
-// chat activity. Set via initTextChat({ onState, onReply }).
 let onState = () => {};
 let onReply = () => {};
 
@@ -41,7 +42,7 @@ export function openTextChat() {
         clearEmpty();
         const empty = document.createElement('div');
         empty.className = 'text-chat-empty';
-        empty.textContent = 'Type below to begin, sir.';
+        empty.textContent = 'Connected to Hermes Gateway. Type below, sir.';
         els.messages.appendChild(empty);
     }
     setTimeout(() => els.input.focus(), 30);
@@ -59,6 +60,11 @@ async function send() {
     const text = els.input.value.trim();
     if (!text || busy) return;
 
+    if (hermes.state !== 'open') {
+        els.messages.appendChild(msgEl('Gateway offline. Check settings.', 'kelex error'));
+        return;
+    }
+
     clearEmpty();
     els.messages.appendChild(msgEl(text, 'user'));
     els.input.value = '';
@@ -70,23 +76,63 @@ async function send() {
     setStatus('◉ THINKING', 'thinking');
     onState('processing');
 
-    try {
-        const data = await chat(text);
-        const reply = (data && data.reply) || '(no reply)';
-        els.messages.appendChild(msgEl(reply, 'kelex'));
-        onReply(reply, data && data.actions);
-        setStatus('○ STANDBY');
-    } catch (e) {
-        const errText = `Link error, sir: ${e}`;
-        els.messages.appendChild(msgEl(errText, 'kelex error'));
-        onReply(errText, null, true);
-        setStatus('⚠ ERROR', 'error');
-    } finally {
+    // Create a placeholder for the streaming response
+    currentStreamMsg = document.createElement('div');
+    currentStreamMsg.className = 'text-chat-msg kelex';
+    currentStreamMsg.textContent = '';
+    els.messages.appendChild(currentStreamMsg);
+
+    // Subscribe to streaming events for this response
+    const done = () => {
         busy = false;
         els.send.disabled = false;
-        scrollDown();
+        setStatus('○ STANDBY');
         onState('standby');
+        currentStreamMsg = null;
+        if (unsubscribe) { unsubscribe(); unsubscribe = null; }
+        scrollDown();
         setTimeout(() => els.input.focus(), 0);
+    };
+
+    unsubscribe = hermes.onAny((evt) => {
+        switch (evt.type) {
+            case 'message.delta':
+                if (evt.payload?.text && currentStreamMsg) {
+                    currentStreamMsg.textContent += evt.payload.text;
+                    scrollDown();
+                }
+                break;
+            case 'thinking.delta':
+                setStatus('◉ THINKING', 'thinking');
+                break;
+            case 'message.complete':
+                if (currentStreamMsg && !currentStreamMsg.textContent) {
+                    currentStreamMsg.textContent = evt.payload?.text || '(no reply)';
+                }
+                const finalText = currentStreamMsg?.textContent || evt.payload?.text || '';
+                onReply(finalText);
+                done();
+                break;
+            case 'error':
+                currentStreamMsg.textContent = evt.payload?.message || 'Gateway error, sir.';
+                currentStreamMsg.className = 'text-chat-msg kelex error';
+                onReply('', null, true);
+                done();
+                break;
+        }
+    });
+
+    // Fire the chat request
+    try {
+        await hermes.chat(text, sessionId());
+    } catch (e) {
+        if (currentStreamMsg) {
+            currentStreamMsg.textContent = `Link error, sir: ${e.message}`;
+            currentStreamMsg.className = 'text-chat-msg kelex error';
+        }
+        onReply('', null, true);
+        setStatus('⚠ ERROR', 'error');
+        done();
     }
 }
 
@@ -117,7 +163,6 @@ export function initTextChat(hooks = {}) {
         els.messages.appendChild(empty);
     };
 
-    // Auto-grow textarea + Enter to send (Shift+Enter = newline).
     els.input.addEventListener('input', () => {
         els.input.style.height = 'auto';
         els.input.style.height = Math.min(els.input.scrollHeight, 120) + 'px';

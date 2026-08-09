@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>kelex-talk</title>
+    <title>Kelex</title>
     <link
         href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700;900&family=Rajdhani:wght@300;400;500;600;700&display=swap"
         rel="stylesheet">
@@ -32,12 +32,12 @@
 
     <div class="output-panel">
         <div class="transcript" id="transcript"></div>
-        <div class="response" id="response">Awaiting neural link, sir.</div>
+        <div class="response" id="response">Neural link offline, sir.</div>
     </div>
 
     <div class="sys-status">UPLINK: <span id="sysInfo">offline</span></div>
 
-    <!-- Text chat overlay — Ctrl/Cmd+K to toggle. Bottom dock; orb stays visible. -->
+    <!-- Text chat overlay — Ctrl/Cmd+K to toggle. -->
     <div class="text-chat-overlay" id="textChatOverlay">
         <div class="text-chat-panel">
             <div class="text-chat-messages" id="textChatMessages"></div>
@@ -57,30 +57,46 @@
         </div>
     </div>
 
-    <!-- Settings panel — tray "Settings…" or the ⚙ button. -->
+    <!-- Settings panel — ⚙ button or tray "Settings…" -->
     <div class="settings-overlay" id="settingsOverlay">
         <div class="settings-panel">
-            <div class="settings-title">SETTINGS</div>
+            <div class="settings-title">HERMES GATEWAY</div>
+
             <label class="settings-field">
-                <span>Backend URL</span>
-                <input id="setBackendUrl" type="text" autocomplete="off" spellcheck="false"
-                    placeholder="http://localhost:7777">
+                <span>Gateway URL</span>
+                <input id="setGatewayUrl" type="text" autocomplete="off" spellcheck="false"
+                    placeholder="https://hermes-gateway.akikp.in">
             </label>
+
             <label class="settings-field">
-                <span>Internal token</span>
-                <input id="setToken" type="password" autocomplete="off" spellcheck="false">
+                <span>Username</span>
+                <input id="setUsername" type="text" autocomplete="off" spellcheck="false"
+                    placeholder="admin">
             </label>
+
+            <label class="settings-field">
+                <span>Password</span>
+                <input id="setPassword" type="password" autocomplete="off" spellcheck="false"
+                    placeholder="Leave blank to keep current">
+            </label>
+
+            <div class="settings-divider"></div>
+            <div class="settings-title">APP</div>
+
             <label class="settings-field">
                 <span>Global hotkey</span>
                 <input id="setHotkey" type="text" autocomplete="off" spellcheck="false"
                     placeholder="CmdOrCtrl+Shift+J">
             </label>
+
             <label class="settings-check">
                 <input id="setAutostart" type="checkbox"> Start at login
             </label>
+
             <label class="settings-check">
-                <input id="setWake" type="checkbox"> Wake word — say “Jarvis” (always-on mic)
+                <input id="setWake" type="checkbox"> Wake word — say "Kelex" (always-on mic)
             </label>
+
             <div class="settings-actions">
                 <button class="control-btn" id="btnSettingsCancel">Cancel</button>
                 <button class="control-btn settings-save" id="btnSettingsSave">Save</button>
