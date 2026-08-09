@@ -1,43 +1,28 @@
-// Voice conversation: browser SpeechRecognition → Hermes Gateway → SpeechSynthesis.
+// Voice conversation: native CPAL capture → Hermes Gateway → SpeechSynthesis.
 //
-// Important macOS/WKWebView constraint: do NOT call getUserMedia just to draw
-// an audio analyser. That optional capture request is denied from the custom
-// Tauri origin on some WebKit versions, even when macOS has granted Kelex mic
-// access. SpeechRecognition owns the microphone capture for transcription.
+// No WebKit SpeechRecognition. No getUserMedia. The Rust backend captures
+// the mic via CPAL, sends WAV to Hermes /api/audio/transcribe, and returns
+// the transcript back to the webview. The transcript then goes to the
+// Gateway chat over the existing WebSocket, and the response is spoken via
+// browser SpeechSynthesis.
 
 import { state } from './state.js';
 import { setState, showResponse, showTranscript, appendResponseText } from './ui.js';
-import { wakePause, wakeResume } from '../config.js';
+import { wakePause, wakeResume, captureAndTranscribe } from '../config.js';
 import { hermes } from '../hermes-client.js';
 import { speak, interrupt as ttsInterrupt } from './tts.js';
 
-const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-let recognition = null;
 let hermesUnsub = null;
 
-function getRecognition() {
-    if (!recognition) {
-        if (!SpeechRecognition) return null;
-        recognition = new SpeechRecognition();
-        recognition.continuous = false;
-        recognition.interimResults = true;
-        recognition.lang = 'en-US';
-    }
-    return recognition;
-}
-
-export function releaseMediaStream() {
-    if (state.currentMicStream) {
-        try { state.currentMicStream.getTracks().forEach(t => t.stop()); } catch (_) {}
-        state.currentMicStream = null;
-    }
-}
+// No-op — we never hold a media stream from the webview side.
+export function releaseMediaStream() {}
 
 export function activateConversation() {
     if (state.conversationActive) return;
     state.conversationActive = true;
 
-    // Fully releases native CPAL wake capture before SpeechRecognition starts.
+    // Release the native CPAL wake listener so capture_and_transcribe can
+    // open its own stream without fighting for the input device.
     wakePause();
     showResponse('Online and ready, sir.');
     setState('listening');
@@ -63,7 +48,7 @@ export function activateConversation() {
                 speak(final).then(() => {
                     if (state.conversationActive && !state.isProcessing) {
                         setState('listening');
-                        setTimeout(startListening, 400);
+                        startListening();
                     }
                 });
                 break;
@@ -78,8 +63,9 @@ export function activateConversation() {
         }
     });
 
-    // Let CPAL release the input device before WebKit begins recognition.
-    setTimeout(startListening, 900);
+    // Brief delay for the wake CPAL stream to fully release before we open
+    // our own capture stream.
+    setTimeout(startListening, 300);
 }
 
 export function deactivateConversation(options = {}) {
@@ -90,9 +76,6 @@ export function deactivateConversation(options = {}) {
     state.isSpeaking = false;
 
     releaseMediaStream();
-    if (recognition) {
-        try { recognition.abort(); } catch (_) {}
-    }
     if (hermesUnsub) { hermesUnsub(); hermesUnsub = null; }
     ttsInterrupt();
 
@@ -109,14 +92,9 @@ export function isConversationActive() {
     return state.conversationActive;
 }
 
-export function startListening() {
+export async function startListening() {
     if (!state.conversationActive || state.isListening || state.isProcessing || state.isSpeaking) return;
 
-    const rec = getRecognition();
-    if (!rec) {
-        showResponse('Speech recognition is unavailable. Use text chat (Cmd/Ctrl+K).');
-        return;
-    }
     if (hermes.state !== 'open') {
         showResponse('Gateway offline. Voice unavailable, sir.');
         if (state.conversationActive) setTimeout(startListening, 3000);
@@ -125,17 +103,13 @@ export function startListening() {
 
     state.isListening = true;
     setState('listening');
-    console.log('[conv] starting SpeechRecognition');
+    console.log('[conv] starting native capture_and_transcribe');
 
-    let finalTranscript = '';
-    let settled = false;
-
-    const finish = () => {
-        if (settled) return;
-        settled = true;
+    try {
+        const transcript = await captureAndTranscribe();
         state.isListening = false;
 
-        const text = finalTranscript.trim();
+        const text = (transcript || '').trim();
         if (text) {
             showTranscript(text);
             state.isProcessing = true;
@@ -150,41 +124,27 @@ export function startListening() {
                 }
             });
         } else if (state.conversationActive) {
+            // Empty transcript — retry silently.
             setTimeout(startListening, 350);
         }
-    };
-
-    rec.onresult = (event) => {
-        let interim = '';
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-            const result = event.results[i];
-            if (result.isFinal) finalTranscript += result[0].transcript;
-            else interim += result[0].transcript;
-        }
-        showTranscript(finalTranscript + interim);
-    };
-
-    rec.onerror = (event) => {
-        console.warn('[conv] SpeechRecognition error:', event.error);
-        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
-            const reason = `Speech recognition denied (${event.error}). macOS grants Microphone and Speech Recognition separately — enable Kelex under System Settings → Privacy & Security → Speech Recognition.`;
-            console.error('[conv]', reason);
-            deactivateConversation({ announce: false });
-            showResponse(reason);
-            return;
-        }
-        // no-speech / aborted are normal loop conditions
-        finish();
-    };
-
-    rec.onend = finish;
-
-    try {
-        rec.start();
     } catch (e) {
         state.isListening = false;
-        console.error('[conv] recognition start failed:', e);
-        showResponse(`Speech recognition unavailable, sir. (${e.name || e})`);
-        if (state.conversationActive) setTimeout(startListening, 2000);
+        const msg = typeof e === 'string' ? e : (e?.message || String(e));
+        console.error('[conv] capture_and_transcribe failed:', msg);
+
+        // "No speech within 15 seconds" is a normal timeout — retry silently.
+        if (msg.includes('No speech detected')) {
+            if (state.conversationActive) {
+                setState('listening');
+                setTimeout(startListening, 500);
+            }
+            return;
+        }
+
+        showResponse(`Voice capture failed: ${msg}`);
+        if (state.conversationActive) {
+            setState('listening');
+            setTimeout(startListening, 3000);
+        }
     }
 }

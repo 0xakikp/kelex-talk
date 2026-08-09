@@ -250,6 +250,11 @@ fn notify(app: AppHandle, title: String, body: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn capture_and_transcribe(app: AppHandle) -> Result<String, String> {
+    wake::capture_and_transcribe(app).await
+}
+
+#[tauri::command]
 async fn connect_gateway(app: AppHandle) -> Result<String, String> {
     proxy::start_proxy(app).await
 }
@@ -451,6 +456,7 @@ pub fn run() {
             wake_pause,
             wake_resume,
             notify,
+            capture_and_transcribe,
             connect_gateway,
         ])
         .run(tauri::generate_context!())

@@ -97,6 +97,12 @@ export async function wakeResume() {
     try { await invoke('wake_resume'); } catch (_) {}
 }
 
+// ── Native voice capture → transcription ──────────────────────────────
+
+export async function captureAndTranscribe() {
+    return invoke('capture_and_transcribe');
+}
+
 // ── Session id ────────────────────────────────────────────────────────
 
 export function sessionId() {

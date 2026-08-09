@@ -2,8 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <!-- Required for WKWebView getUserMedia (voice conversation). Without
-         this, macOS denies/crashes on first mic access. -->
+    <!-- Native CPAL microphone capture — no WebKit getUserMedia involved. -->
     <key>NSMicrophoneUsageDescription</key>
     <string>Kelex uses the microphone for hands-free conversations with your Hermes Agent.</string>
 </dict>

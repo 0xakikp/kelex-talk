@@ -289,6 +289,91 @@ fn encode_wav(samples: &[i16]) -> Vec<u8> {
     cursor.into_inner()
 }
 
+/// Capture one VAD-bounded utterance from the native microphone and return WAV.
+/// This is deliberately native CPAL, not WKWebView getUserMedia: macOS WebKit
+/// does not expose SpeechRecognition reliably to Tauri apps.
+fn capture_utterance_wav() -> Result<Vec<u8>, String> {
+    let host = cpal::default_host();
+    let device = host.default_input_device().ok_or("No microphone input device")?;
+    let input = device.default_input_config().map_err(|e| format!("Microphone config: {e}"))?;
+    let sr = input.sample_rate().0 as f32;
+    let channels = input.channels() as usize;
+    let cfg: cpal::StreamConfig = input.clone().into();
+    let (tx, rx) = mpsc::channel::<Vec<f32>>();
+    let paused = Arc::new(AtomicBool::new(false));
+
+    let mk = |tx: mpsc::Sender<Vec<f32>>| Recorder {
+        sr,
+        channels,
+        paused: paused.clone(),
+        tx,
+        buf: Vec::new(),
+        speech: false,
+        silence: 0,
+    };
+
+    let stream = match input.sample_format() {
+        SampleFormat::F32 => {
+            let mut rec = mk(tx.clone());
+            device.build_input_stream(&cfg, move |d: &[f32], _| rec.feed_f32(d), err_fn, None)
+        }
+        SampleFormat::I16 => {
+            let mut rec = mk(tx.clone());
+            device.build_input_stream(&cfg, move |d: &[i16], _| rec.feed_i16(d), err_fn, None)
+        }
+        SampleFormat::U16 => {
+            let mut rec = mk(tx.clone());
+            device.build_input_stream(&cfg, move |d: &[u16], _| rec.feed_u16(d), err_fn, None)
+        }
+        other => return Err(format!("Unsupported microphone sample format: {other:?}")),
+    }.map_err(|e| format!("Open microphone: {e}"))?;
+
+    drop(tx);
+    stream.play().map_err(|e| format!("Start microphone: {e}"))?;
+    let raw = rx.recv_timeout(Duration::from_secs(15))
+        .map_err(|_| "No speech detected within 15 seconds")?;
+    drop(stream);
+
+    Ok(encode_wav(&resample_to_16k(&raw, sr)))
+}
+
+/// Native voice capture → authenticated Hermes transcription endpoint.
+pub async fn capture_and_transcribe(app: AppHandle) -> Result<String, String> {
+    let (base, username, password) = {
+        let st = app.state::<AppState>();
+        let s = st.settings.lock().map_err(|_| "Settings lock failed")?;
+        (s.gateway_url.trim_end_matches('/').to_string(), s.username.clone(), s.password_hash.clone())
+    };
+    if base.is_empty() { return Err("No gateway URL configured".into()); }
+
+    let wav = tauri::async_runtime::spawn_blocking(capture_utterance_wav)
+        .await
+        .map_err(|e| format!("Native capture task: {e}"))??;
+
+    let jar = Arc::new(reqwest::cookie::Jar::default());
+    let client = reqwest::Client::builder()
+        .cookie_provider(jar)
+        .build()
+        .map_err(|e| format!("HTTP client: {e}"))?;
+
+    let login = client.post(format!("{base}/auth/password-login"))
+        .json(&serde_json::json!({"provider":"basic","username":username,"password":password,"next":""}))
+        .send().await.map_err(|e| format!("Transcription login: {e}"))?;
+    if !login.status().is_success() { return Err(format!("Transcription login failed: {}", login.status())); }
+
+    let part = reqwest::multipart::Part::bytes(wav)
+        .file_name("kelex-utterance.wav")
+        .mime_str("audio/wav").map_err(|e| format!("WAV mime: {e}"))?;
+    let result = client.post(format!("{base}/api/audio/transcribe"))
+        .multipart(reqwest::multipart::Form::new().part("audio", part))
+        .send().await.map_err(|e| format!("Transcription request: {e}"))?;
+    if !result.status().is_success() {
+        return Err(format!("Transcription failed: {}", result.status()));
+    }
+    let body: serde_json::Value = result.json().await.map_err(|e| format!("Transcription response: {e}"))?;
+    Ok(body.get("transcript").and_then(|v| v.as_str()).unwrap_or("").trim().to_string())
+}
+
 /// POST the WAV to /api/wake-detect. Returns true on wake + voiceprint match.
 async fn post(http: &reqwest::Client, url: &str, auth: &str, wav: Vec<u8>) -> bool {
     let part = match reqwest::multipart::Part::bytes(wav)
