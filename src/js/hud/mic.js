@@ -17,14 +17,14 @@ let hermesUnsub = null;
 // No-op — we never hold a media stream from the webview side.
 export function releaseMediaStream() {}
 
-export async function activateConversation() {
+export function activateConversation() {
     if (state.conversationActive) return;
     state.conversationActive = true;
 
-    // Release the wake CPAL stream and WAIT for it.  The Rust side now
-    // polls until the wake thread confirms the stream is dropped — without
-    // this, the capture AudioUnit gets silence from CoreAudio.
-    await wakePause();
+    // Pause the wake VAD so wake-word detection doesn't fire during
+    // conversation.  The CPAL stream stays open — capture_and_transcribe
+    // piggybacks on it via WakeFlags.conversation_capture.
+    wakePause();
     showResponse('Online and ready, sir.');
     setState('listening');
 

@@ -37,11 +37,14 @@ const WAKE_WORDS: [&str; 16] = [
 /// Shared flags, cloneable into the audio thread + Tauri state.
 #[derive(Clone)]
 pub struct WakeFlags {
-    running: Arc<AtomicBool>,
-    paused: Arc<AtomicBool>,
+    pub running: Arc<AtomicBool>,
+    pub paused: Arc<AtomicBool>,
     /// Set by the wake thread AFTER the CPAL stream is fully dropped.
-    /// wake_pause polls this to know when it's safe to open a new stream.
     pub stopped: Arc<AtomicBool>,
+    /// When Some, the next VAD utterance is routed to /api/audio/transcribe
+    /// and the transcript is sent through this oneshot.  Used by
+    /// capture_and_transcribe to piggyback on the wake stream.
+    pub conversation_capture: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
 }
 
 impl WakeFlags {
@@ -49,7 +52,8 @@ impl WakeFlags {
         Self {
             running: Arc::new(AtomicBool::new(false)),
             paused: Arc::new(AtomicBool::new(false)),
-            stopped: Arc::new(AtomicBool::new(true)), // true = not running yet
+            stopped: Arc::new(AtomicBool::new(true)),
+            conversation_capture: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 }
@@ -64,10 +68,24 @@ pub fn start(app: &AppHandle) {
     flags.stopped.store(false, Ordering::SeqCst);
 
     let st = app.state::<AppState>();
-    let (url, auth) = st.endpoint("/api/wake-detect");
+    let (wake_url, wake_auth) = st.endpoint("/api/wake-detect");
+    let (transcribe_url, _) = st.endpoint("/api/audio/transcribe");
+    // Transcription uses cookie auth (logged in via HTTP), not basic auth.
+    let gateway_base = {
+        let s = st.settings.lock().unwrap();
+        s.gateway_url.trim_end_matches('/').to_string()
+    };
+    let gateway_user = {
+        let s = st.settings.lock().unwrap();
+        s.username.clone()
+    };
+    let gateway_pass = {
+        let s = st.settings.lock().unwrap();
+        s.password_hash.clone()
+    };
     let http = st.http.clone();
     let app = app.clone();
-    std::thread::spawn(move || run(app, flags, url, auth, http));
+    std::thread::spawn(move || run(app, flags, wake_url, wake_auth, transcribe_url, gateway_base, gateway_user, gateway_pass, http));
 }
 
 pub fn stop(app: &AppHandle) {
@@ -85,7 +103,17 @@ fn err_fn(e: cpal::StreamError) {
     eprintln!("[wake] stream error: {e}");
 }
 
-fn run(app: AppHandle, flags: WakeFlags, url: String, auth: String, http: reqwest::Client) {
+fn run(
+    app: AppHandle,
+    flags: WakeFlags,
+    wake_url: String,
+    wake_auth: String,
+    transcribe_url: String,
+    gateway_base: String,
+    gateway_user: String,
+    gateway_pass: String,
+    http: reqwest::Client,
+) {
     let host = cpal::default_host();
     let Some(device) = host.default_input_device() else {
         eprintln!("[wake] no input device");
@@ -104,7 +132,7 @@ fn run(app: AppHandle, flags: WakeFlags, url: String, auth: String, http: reqwes
     let channels = config.channels() as usize;
     let (tx, rx) = mpsc::channel::<Vec<f32>>();
 
-    // Consumer: resample → WAV → POST → summon on a hit.
+    // Consumer: resample → WAV → route to wake-detect or conversation capture.
     {
         let flags = flags.clone();
         let app = app.clone();
@@ -115,9 +143,27 @@ fn run(app: AppHandle, flags: WakeFlags, url: String, auth: String, http: reqwes
                 }
                 let pcm = resample_to_16k(&raw, sr);
                 let wav = encode_wav(&pcm);
-                let hit = tauri::async_runtime::block_on(post(&http, &url, &auth, wav));
+
+                // Check if conversation capture is active (orb-triggered voice input).
+                let cap_tx = flags.conversation_capture.lock().unwrap().take();
+                if let Some(tx) = cap_tx {
+                    // Route this utterance to /api/audio/transcribe for the orb.
+                    let transcript = tauri::async_runtime::block_on(
+                        transcribe_utterance(
+                            &http, &transcribe_url,
+                            &gateway_base, &gateway_user, &gateway_pass,
+                            wav,
+                        )
+                    );
+                    let _ = tx.send(transcript.unwrap_or_default());
+                    // Don't summon — the orb is already visible.
+                    continue;
+                }
+
+                // Normal wake-word path.
+                let hit = tauri::async_runtime::block_on(post(&http, &wake_url, &wake_auth, wav));
                 if hit {
-                    flags.paused.store(true, Ordering::SeqCst); // hush during the turn
+                    flags.paused.store(true, Ordering::SeqCst);
                     let a = app.clone();
                     let _ = app.run_on_main_thread(move || summon(&a));
                     std::thread::sleep(Duration::from_millis(COOLDOWN_MS));
@@ -408,41 +454,80 @@ fn capture_utterance_wav() -> Result<Vec<u8>, String> {
     Ok(encode_wav(&resample_to_16k(&raw, sr)))
 }
 
-/// Native voice capture → authenticated Hermes transcription endpoint.
-pub async fn capture_and_transcribe(app: AppHandle) -> Result<String, String> {
-    let (base, username, password) = {
-        let st = app.state::<AppState>();
-        let s = st.settings.lock().map_err(|_| "Settings lock failed")?;
-        (s.gateway_url.trim_end_matches('/').to_string(), s.username.clone(), s.password_hash.clone())
-    };
-    if base.is_empty() { return Err("No gateway URL configured".into()); }
-
-    let wav = tauri::async_runtime::spawn_blocking(capture_utterance_wav)
-        .await
-        .map_err(|e| format!("Native capture task: {e}"))??;
-
-    let jar = Arc::new(reqwest::cookie::Jar::default());
-    let client = reqwest::Client::builder()
-        .cookie_provider(jar)
-        .build()
-        .map_err(|e| format!("HTTP client: {e}"))?;
-
-    let login = client.post(format!("{base}/auth/password-login"))
+/// Cookie-auth login → POST WAV to /api/audio/transcribe → extract transcript.
+/// Used by both the capture_and_transcribe command and the wake consumer piggyback.
+async fn transcribe_utterance(
+    http: &reqwest::Client,
+    transcribe_url: &str,
+    base: &str,
+    username: &str,
+    password: &str,
+    wav: Vec<u8>,
+) -> Result<String, String> {
+    // Use the passed client for the login (cookie store is shared).
+    let login = http.post(format!("{base}/auth/password-login"))
         .json(&serde_json::json!({"provider":"basic","username":username,"password":password,"next":""}))
         .send().await.map_err(|e| format!("Transcription login: {e}"))?;
-    if !login.status().is_success() { return Err(format!("Transcription login failed: {}", login.status())); }
+    if !login.status().is_success() {
+        return Err(format!("Transcription login failed: {}", login.status()));
+    }
 
     let part = reqwest::multipart::Part::bytes(wav)
         .file_name("kelex-utterance.wav")
         .mime_str("audio/wav").map_err(|e| format!("WAV mime: {e}"))?;
-    let result = client.post(format!("{base}/api/audio/transcribe"))
+    let result = http.post(transcribe_url)
         .multipart(reqwest::multipart::Form::new().part("audio", part))
         .send().await.map_err(|e| format!("Transcription request: {e}"))?;
     if !result.status().is_success() {
         return Err(format!("Transcription failed: {}", result.status()));
     }
-    let body: serde_json::Value = result.json().await.map_err(|e| format!("Transcription response: {e}"))?;
-    Ok(body.get("transcript").and_then(|v| v.as_str()).unwrap_or("").trim().to_string())
+    let body: serde_json::Value = result.json().await
+        .map_err(|e| format!("Transcription response: {e}"))?;
+    Ok(body.get("transcript")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string())
+}
+
+/// Piggyback on the wake listener's CPAL stream — no second AudioUnit.
+/// Sets a oneshot in WakeFlags; the next VAD utterance from the always-on
+/// wake stream is routed to /api/audio/transcribe instead of wake-detect.
+pub async fn capture_and_transcribe(app: AppHandle) -> Result<String, String> {
+    // Verify gateway is configured.
+    {
+        let st = app.state::<AppState>();
+        let s = st.settings.lock().map_err(|_| "Settings lock failed")?;
+        if s.gateway_url.trim_end_matches('/').is_empty() {
+            return Err("No gateway URL configured".into());
+        }
+    }
+
+    let flags = app.state::<WakeFlags>().inner().clone();
+    let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+
+    // Register interest: the wake consumer will route the next utterance here.
+    *flags.conversation_capture.lock().unwrap() = Some(tx);
+
+    // Unpause the wake VAD briefly so it picks up the user's speech.
+    flags.paused.store(false, Ordering::SeqCst);
+    eprintln!("[capture] waiting for utterance on wake stream…");
+
+    // Wait for the wake consumer to send us the transcript (max 15 s).
+    let transcript = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        rx,
+    ).await
+        .map_err(|_| "No speech detected within 15 seconds".to_string())
+        .and_then(|r| r.map_err(|_| "Wake consumer dropped".to_string()))?;
+
+    let text = transcript.trim().to_string();
+    eprintln!("[capture] transcript: {text:?}");
+    if text.is_empty() {
+        Err("No speech detected".into())
+    } else {
+        Ok(text)
+    }
 }
 
 /// POST the WAV to /api/wake-detect. Returns true on wake + voiceprint match.
