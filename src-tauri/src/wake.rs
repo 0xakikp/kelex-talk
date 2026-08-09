@@ -130,6 +130,8 @@ fn run(app: AppHandle, flags: WakeFlags, url: String, auth: String, http: reqwes
         buf: Vec::new(),
         speech: false,
         silence: 0,
+        diag_samples: 0,
+        diag_max_rms: Arc::new(std::sync::Mutex::new(0.0f32)),
     };
     let stream = match config.sample_format() {
         SampleFormat::F32 => {
@@ -182,6 +184,8 @@ struct Recorder {
     buf: Vec<f32>,
     speech: bool,
     silence: usize,
+    diag_samples: usize,
+    diag_max_rms: Arc<std::sync::Mutex<f32>>,
 }
 
 impl Recorder {
@@ -222,6 +226,16 @@ impl Recorder {
             return;
         }
         let rms = (acc / mono.len() as f32).sqrt();
+
+        // Diagnostic: track max RMS so we can detect permission-denied silence.
+        self.diag_samples += mono.len();
+        if self.diag_samples % 8000 < mono.len() {
+            // ~every 0.5 s at 16 kHz
+            let mut max = self.diag_max_rms.lock().unwrap();
+            if rms > *max {
+                *max = rms;
+            }
+        }
 
         if !self.speech {
             if rms > RMS_START {
@@ -298,11 +312,18 @@ fn capture_utterance_wav() -> Result<Vec<u8>, String> {
     let input = device.default_input_config().map_err(|e| format!("Microphone config: {e}"))?;
     let sr = input.sample_rate().0 as f32;
     let channels = input.channels() as usize;
+    let fmt = input.sample_format();
     let cfg: cpal::StreamConfig = input.clone().into();
     let (tx, rx) = mpsc::channel::<Vec<f32>>();
     let paused = Arc::new(AtomicBool::new(false));
 
-    let mk = |tx: mpsc::Sender<Vec<f32>>| Recorder {
+    // Shared max-RMS for diagnostics — if mic permission is denied, macOS
+    // CoreAudio returns silence (RMS 0.0).  We log every 2 s so the user
+    // sees why speech isn't being detected.
+    let max_rms = Arc::new(std::sync::Mutex::new(0.0f32));
+    let max_rms_probe = max_rms.clone();
+
+    let mk = |tx: mpsc::Sender<Vec<f32>>, max_rms: Arc<std::sync::Mutex<f32>>| Recorder {
         sr,
         channels,
         paused: paused.clone(),
@@ -310,30 +331,62 @@ fn capture_utterance_wav() -> Result<Vec<u8>, String> {
         buf: Vec::new(),
         speech: false,
         silence: 0,
+        diag_samples: 0usize,
+        diag_max_rms: max_rms,
     };
 
-    let stream = match input.sample_format() {
+    let stream = match fmt {
         SampleFormat::F32 => {
-            let mut rec = mk(tx.clone());
+            let mut rec = mk(tx.clone(), max_rms.clone());
             device.build_input_stream(&cfg, move |d: &[f32], _| rec.feed_f32(d), err_fn, None)
         }
         SampleFormat::I16 => {
-            let mut rec = mk(tx.clone());
+            let mut rec = mk(tx.clone(), max_rms.clone());
             device.build_input_stream(&cfg, move |d: &[i16], _| rec.feed_i16(d), err_fn, None)
         }
         SampleFormat::U16 => {
-            let mut rec = mk(tx.clone());
+            let mut rec = mk(tx.clone(), max_rms.clone());
             device.build_input_stream(&cfg, move |d: &[u16], _| rec.feed_u16(d), err_fn, None)
         }
         other => return Err(format!("Unsupported microphone sample format: {other:?}")),
     }.map_err(|e| format!("Open microphone: {e}"))?;
+
+    eprintln!(
+        "[capture] mic open — sr={sr:.0} ch={channels} fmt={fmt:?}.  Say something…"
+    );
+
+    // Probe the max RMS every 2 s to surface permission-denied silence.
+    let _diag_handle = std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        loop {
+            std::thread::sleep(Duration::from_secs(2));
+            let rms = *max_rms_probe.lock().unwrap();
+            let elapsed = start.elapsed().as_secs();
+            eprintln!(
+                "[capture] diag {elapsed}s — max RMS seen: {rms:.6}  (threshold {RMS_START})"
+            );
+            if rms == 0.0 && elapsed > 4 {
+                eprintln!(
+                    "[capture] ⚠  ZERO audio for {elapsed}s — mic permission likely denied.  "
+                );
+                eprintln!(
+                    "[capture]     Check System Settings → Privacy → Microphone → Kelex"
+                );
+            }
+        }
+    });
 
     drop(tx);
     stream.play().map_err(|e| format!("Start microphone: {e}"))?;
     let raw = rx.recv_timeout(Duration::from_secs(15))
         .map_err(|_| "No speech detected within 15 seconds")?;
     drop(stream);
+    // The diag thread will exit when the process continues (zombie; harmless).
 
+    eprintln!(
+        "[capture] utterance captured — {} samples",
+        raw.len()
+    );
     Ok(encode_wav(&resample_to_16k(&raw, sr)))
 }
 
