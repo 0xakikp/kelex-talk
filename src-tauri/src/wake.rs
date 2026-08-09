@@ -200,6 +200,15 @@ impl Recorder {
     }
 
     fn feed(&mut self, samples: impl Iterator<Item = f32>) {
+        // Log first callback so we know CPAL is delivering audio.
+        if self.diag_samples == 0 {
+            let dev = cpal::default_host()
+                .default_input_device()
+                .map(|d| d.name().unwrap_or_else(|_| "?".into()))
+                .unwrap_or_else(|| "none".into());
+            eprintln!("[capture] first callback — device={dev}");
+        }
+
         if self.paused.load(Ordering::Relaxed) {
             self.buf.clear();
             self.speech = false;
@@ -356,10 +365,13 @@ fn capture_utterance_wav() -> Result<Vec<u8>, String> {
     );
 
     // Probe the max RMS every 2 s to surface permission-denied silence.
+    let diag_running = Arc::new(AtomicBool::new(true));
+    let diag_flag = diag_running.clone();
     let _diag_handle = std::thread::spawn(move || {
         let start = std::time::Instant::now();
-        loop {
+        while diag_flag.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_secs(2));
+            if !diag_flag.load(Ordering::Relaxed) { break; }
             let rms = *max_rms_probe.lock().unwrap();
             let elapsed = start.elapsed().as_secs();
             eprintln!(
@@ -381,7 +393,7 @@ fn capture_utterance_wav() -> Result<Vec<u8>, String> {
     let raw = rx.recv_timeout(Duration::from_secs(15))
         .map_err(|_| "No speech detected within 15 seconds")?;
     drop(stream);
-    // The diag thread will exit when the process continues (zombie; harmless).
+    diag_running.store(false, Ordering::Relaxed);
 
     eprintln!(
         "[capture] utterance captured — {} samples",
