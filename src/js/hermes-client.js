@@ -30,18 +30,9 @@ export class HermesClient {
   // ── Connection ──────────────────────────────────────────────────────
 
   connect(gatewayUrl) {
-    // Accept https://host or wss://host — convert to WS URL + /rpc path.
-    let url = gatewayUrl.replace(/\/+$/, '');
-    if (url.startsWith('https://')) {
-      url = 'wss://' + url.slice(8);
-    } else if (url.startsWith('http://')) {
-      url = 'ws://' + url.slice(7);
-    } else if (!url.startsWith('ws://') && !url.startsWith('wss://')) {
-      url = 'wss://' + url;
-    }
-    if (!url.endsWith('/rpc')) {
-      url += '/rpc';
-    }
+    // URL comes pre-built from gatewayWsUrl() — already wss://... with
+    // embedded basic auth and /api/ws path. Just use it directly.
+    const url = gatewayUrl;
     this._url = url;
 
     if (this._socket?.readyState === WebSocket.OPEN || this._state === 'connecting') {

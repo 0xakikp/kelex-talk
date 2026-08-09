@@ -2,8 +2,7 @@
 // of the frontend never touches window.__TAURI__ directly.
 //
 // Hermes Gateway settings are persisted via Rust (settings.json) and the
-// WebSocket connection is made directly from the webview (no Rust proxy
-// needed — Hermes Gateway ships proper CORS/WS support).
+// WebSocket connection is made directly from the webview.
 
 const TAURI = window.__TAURI__;
 const invoke = TAURI?.core?.invoke;
@@ -25,18 +24,15 @@ export async function setSettings(settings) {
     return invoke('set_settings', { settings });
 }
 
-/** Load once at startup and cache. */
 export async function loadSettings() {
     _settings = await getSettings();
     return _settings;
 }
 
-/** Hermes Gateway backend URL (e.g. https://hermes-gateway.akikp.in). */
 export function gatewayUrl() {
     return (_settings && _settings.gateway_url) || '';
 }
 
-/** Basic auth credentials for gateway. */
 export function gatewayAuth() {
     return {
         username: (_settings && _settings.username) || '',
@@ -44,13 +40,22 @@ export function gatewayAuth() {
     };
 }
 
-/** Full WebSocket URL with embedded basic auth. */
+/**
+ * Build the WebSocket URL for Hermes Gateway's backend.
+ *
+ * Hermes serve binds /api/ws for WebSocket JSON-RPC. Auth is via HTTP
+ * Basic Auth (username:password). We embed credentials in the URL —
+ * browsers forward them as the Authorization header on WebSocket upgrade.
+ *
+ * Returns e.g. wss://user:pass@hermes-gateway.akikp.in/api/ws
+ */
 export function gatewayWsUrl() {
     const u = gatewayUrl();
     if (!u) return '';
     const auth = gatewayAuth();
     let base = u.replace(/\/+$/, '');
-    // Build wss://user:pass@host/rpc
+
+    // Convert http(s):// to ws(s)://
     let wsBase;
     if (base.startsWith('https://')) {
         wsBase = 'wss://' + base.slice(8);
@@ -59,11 +64,14 @@ export function gatewayWsUrl() {
     } else {
         wsBase = 'wss://' + base;
     }
+
+    const host = wsBase.replace(/^wss?:\/\//, '');
     if (auth.username && auth.password) {
-        const host = wsBase.replace(/^wss?:\/\//, '');
-        return 'wss://' + encodeURIComponent(auth.username) + ':' + encodeURIComponent(auth.password) + '@' + host + '/rpc';
+        // Embed basic auth in URL — browser sends Authorization header
+        return 'wss://' + encodeURIComponent(auth.username) + ':' +
+               encodeURIComponent(auth.password) + '@' + host + '/api/ws';
     }
-    return wsBase + '/rpc';
+    return 'wss://' + host + '/api/ws';
 }
 
 // ── Window mode ───────────────────────────────────────────────────────
