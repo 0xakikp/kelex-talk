@@ -30,6 +30,7 @@ url = "2"
 urlencoding = "2"
 tokio-tungstenite = { version = "0.24", features = ["__rustls-tls"] }
 rustls-native-certs = "0.8"
-rustls = "0.23"
+# Pin a single Rustls crypto provider. Both reqwest and the WS proxy share it.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 futures-util = "0.3"
 tokio = { version = "1", features = ["net", "rt", "sync", "macros"] }

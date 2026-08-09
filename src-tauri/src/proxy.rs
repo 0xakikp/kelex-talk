@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
 use reqwest::cookie::{Jar, CookieStore};
-use rustls::ClientConfig;
+use rustls::{ClientConfig, crypto::ring};
 use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async_tls_with_config, accept_async, Connector};
 use tauri::{AppHandle, Manager};
@@ -15,6 +15,11 @@ use tauri::{AppHandle, Manager};
 use crate::AppState;
 
 fn native_connector() -> Result<Connector, String> {
+    // Rustls 0.23 needs a process-wide provider chosen before a ClientConfig
+    // builder is invoked. `ring` is explicitly enabled in Cargo.toml. An
+    // Err only means a compatible provider was already installed by reqwest.
+    let _ = ring::default_provider().install_default();
+
     let mut roots = rustls::RootCertStore::empty();
     let certs = rustls_native_certs::load_native_certs().certs;
     for c in certs { let _ = roots.add(c); }
