@@ -2,7 +2,8 @@
 // of the frontend never touches window.__TAURI__ directly.
 //
 // Hermes Gateway settings are persisted via Rust (settings.json) and the
-// WebSocket connection is made directly from the webview.
+// WebSocket connection is made directly from the webview. Auth is via
+// session cookie obtained from POST /login.
 
 const TAURI = window.__TAURI__;
 const invoke = TAURI?.core?.invoke;
@@ -40,22 +41,10 @@ export function gatewayAuth() {
     };
 }
 
-/**
- * Build the WebSocket URL for Hermes Gateway's backend.
- *
- * Hermes serve binds /api/ws for WebSocket JSON-RPC. Auth is via HTTP
- * Basic Auth (username:password). We embed credentials in the URL —
- * browsers forward them as the Authorization header on WebSocket upgrade.
- *
- * Returns e.g. wss://user:pass@hermes-gateway.akikp.in/api/ws
- */
 export function gatewayWsUrl() {
     const u = gatewayUrl();
     if (!u) return '';
-    const auth = gatewayAuth();
     let base = u.replace(/\/+$/, '');
-
-    // Convert http(s):// to ws(s)://
     let wsBase;
     if (base.startsWith('https://')) {
         wsBase = 'wss://' + base.slice(8);
@@ -64,14 +53,7 @@ export function gatewayWsUrl() {
     } else {
         wsBase = 'wss://' + base;
     }
-
-    const host = wsBase.replace(/^wss?:\/\//, '');
-    if (auth.username && auth.password) {
-        // Embed basic auth in URL — browser sends Authorization header
-        return 'wss://' + encodeURIComponent(auth.username) + ':' +
-               encodeURIComponent(auth.password) + '@' + host + '/api/ws';
-    }
-    return 'wss://' + host + '/api/ws';
+    return wsBase + '/api/ws';
 }
 
 // ── Window mode ───────────────────────────────────────────────────────

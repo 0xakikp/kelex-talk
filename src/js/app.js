@@ -5,11 +5,11 @@
 // Ctrl/Cmd+K = text chat (Hermes JSON-RPC WebSocket).
 // Esc = interrupt / close panels.
 
-import { loadSettings, isWindowed, gatewayWsUrl } from './config.js';
+import { loadSettings, isWindowed, gatewayWsUrl, gatewayUrl, gatewayAuth } from './config.js';
 import { hermes } from './hermes-client.js';
 import { initUI, setState, showResponse, setUplink, showAction, clearAction } from './hud/ui.js';
 import { state } from './hud/state.js';
-import { toggleConversation, isConversationActive } from './hud/mic.js';
+import { toggleConversation } from './hud/mic.js';
 import { interruptResponse } from './hud/tts.js';
 import { initTextChat, toggleTextChat, closeTextChat, isTextChatOpen } from './hud/text-chat.js';
 import { initSettings, openSettings, closeSettings, isSettingsOpen } from './hud/settings.js';
@@ -19,22 +19,32 @@ const reactorCore = document.getElementById('reactorCore');
 
 initUI();
 
-// ── Hermes Gateway connection ─────────────────────────────────────────
+// ── Hermes Gateway connection (login + WebSocket) ─────────────────────
 
 let reconnectTimer = null;
 
 async function connectGateway() {
-    const url = gatewayWsUrl();
-    if (!url) {
+    const wsUrl = gatewayWsUrl();
+    const gw = gatewayUrl();
+    const auth = gatewayAuth();
+
+    if (!gw) {
         setUplink('offline', 'No gateway configured — open Settings');
         return;
     }
-    setUplink('connecting', 'connecting…');
 
     try {
-        await hermes.connect(url);
+        // Step 1: Login to get session cookie
+        if (auth.username && auth.password) {
+            setUplink('connecting', 'logging in…');
+            await hermes.login(gw, auth.username, auth.password);
+        }
+
+        // Step 2: Connect WebSocket
+        setUplink('connecting', 'connecting…');
+        await hermes.connect(wsUrl);
         setUplink('online', 'online');
-        console.log('[kelex] Gateway connected:', url);
+        console.log('[kelex] Gateway connected:', wsUrl);
     } catch (e) {
         setUplink('offline', `offline — ${e.message}`);
         console.warn('[kelex] Gateway connect failed:', e.message);
@@ -57,7 +67,7 @@ hermes.onState((s) => {
     }
 });
 
-// ── Live action status — shows what Hermes is doing in the top-right ──
+// ── Live action status ────────────────────────────────────────────────
 
 hermes.onAny((evt) => {
     switch (evt.type) {
@@ -72,9 +82,6 @@ hermes.onAny((evt) => {
             showAction(name.toUpperCase());
             break;
         }
-        case 'tool.progress':
-            // Keep the tool name visible, refresh the timer
-            break;
         case 'tool.complete':
         case 'message.complete':
         case 'message.interim':
@@ -131,7 +138,6 @@ document.addEventListener('keydown', (e) => {
         toggleTextChat();
         return;
     }
-    // Cmd/Ctrl+, = open settings (standard macOS preferences shortcut)
     if (e.code === 'Comma' && (e.ctrlKey || e.metaKey) && !e.repeat) {
         e.preventDefault();
         if (isSettingsOpen()) closeSettings();
@@ -184,7 +190,7 @@ if (TAURI?.event?.listen) {
         responseLink.onclick = (e) => { e.preventDefault(); openSettings(); };
     }
 
-    const gw = gatewayWsUrl();
+    const gw = gatewayUrl();
     if (gw) {
         await connectGateway();
         document.getElementById('response').textContent = 'Neural link online, sir.';
@@ -192,5 +198,5 @@ if (TAURI?.event?.listen) {
         setUplink('offline', 'No gateway configured');
     }
 
-    console.log('[kelex] Online — Hermes Agent Desktop Client (Phase 2 voice).');
+    console.log('[kelex] Online — Hermes Agent Desktop Client.');
 })();
